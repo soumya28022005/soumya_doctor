@@ -18,6 +18,8 @@ const db = new pg.Client({
 });
 db.connect();
 
+let doctorQueueStatus = {};
+
 // --- Helper Functions ---
 async function getNextQueueNumber(doctorId, date, clinicId) {
     const result = await db.query(
@@ -154,10 +156,81 @@ app.post("/api/appointments/book", async (req, res) => {
     }
 });
 
+app.post("/api/doctor/next-patient", async (req, res) => {
+    const { doctorId, clinicId } = req.body;
+    const today = new Date().toISOString().slice(0, 10);
+
+    try {
+        // Find the next available patient
+        const result = await db.query(
+            `SELECT * FROM appointments
+            WHERE doctor_id = $1
+            AND clinic_id = $2
+            AND date = $3
+            AND status NOT IN ('Done', 'Absent')
+            ORDER BY queue_number ASC
+            LIMIT 1`,
+            [doctorId, clinicId, today]
+        );
+
+        if (result.rows.length > 0) {
+            const appointmentToUpdate = result.rows[0];
+            await db.query(
+                "UPDATE appointments SET status = 'Done' WHERE id = $1",
+                [appointmentToUpdate.id]
+            );
+
+            const queueKey = `${doctorId}_${clinicId}`;
+            if (!doctorQueueStatus[queueKey] || doctorQueueStatus[queueKey].date !== today) {
+                 const totalResult = await db.query(
+                    "SELECT COUNT(*) FROM appointments WHERE doctor_id = $1 AND clinic_id = $2 AND date = $3",
+                    [doctorId, clinicId, today]
+                );
+                doctorQueueStatus[queueKey] = {
+                    date: today,
+                    currentNumber: 0,
+                    totalPatients: parseInt(totalResult.rows[0].count)
+                };
+            }
+            doctorQueueStatus[queueKey].currentNumber = appointmentToUpdate.queue_number;
+
+            res.json({ success: true, message: "Patient status updated to Done." });
+        } else {
+            res.json({ success: false, message: "No more patients in the queue." });
+        }
+    } catch (err) {
+        console.error("Error in next-patient:", err);
+        res.status(500).json({ success: false, message: "Error processing next patient." });
+    }
+});
+app.get("/api/queue-status/:doctorId/:clinicId", async (req, res) => {
+    const { doctorId, clinicId } = req.params;
+    const today = new Date().toISOString().slice(0, 10);
+
+    try {
+        // Find the highest queue number for a 'Done' appointment
+        const doneStatusRes = await db.query(
+            `SELECT MAX(queue_number) as current_number FROM appointments
+             WHERE doctor_id = $1 AND clinic_id = $2 AND date = $3 AND status = 'Done'`,
+            [doctorId, clinicId, today]
+        );
+
+        const currentNumber = parseInt(doneStatusRes.rows[0].current_number) || 0;
+
+        res.json({
+            success: true,
+            currentNumber: currentNumber,
+        });
+
+    } catch (err) {
+        console.error("API /api/queue-status error:", err);
+        res.status(500).json({ success: false, message: "Failed to get queue status" });
+    }
+});
+
 // Add other routes here...
 
 // --- Server ---
 app.listen(port, () => {
     console.log(`Backend server running on http://localhost:${port}`);
 });
-
