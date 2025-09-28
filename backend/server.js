@@ -223,7 +223,7 @@ app.post("/api/receptionist/handle-join-request", async (req, res) => {
 });
 
 app.post("/api/receptionist/add-doctor", async (req, res) => {
-    const { name, specialty, username, password, Phonenumber, startTime, endTime, days, customSchedule, clinicId } = req.body;
+    const { name, specialty, username, password, Phonenumber, startTime, endTime, days, customSchedule = null, clinicId } = req.body;
     try {
         const newDoctor = await db.query("INSERT INTO doctors (name, specialty, username, password, phone) VALUES ($1, $2, $3, $4, $5) RETURNING *",
             [name, specialty, username, password, Phonenumber]).then(r => r.rows[0]);
@@ -231,17 +231,20 @@ app.post("/api/receptionist/add-doctor", async (req, res) => {
             [newDoctor.id, clinicId, startTime, endTime, days.join(','), customSchedule]);
         res.json({ success: true });
     } catch (err) {
+        console.error("Error in /api/receptionist/add-doctor:", err); // Added for better debugging
         res.status(500).json({ success: false, message: 'Error adding new doctor.' });
     }
 });
 
 app.post("/api/receptionist/invite-doctor", async (req, res) => {
-    const { doctorId, startTime, endTime, days, customSchedule, clinicId } = req.body;
+    const { doctorId, startTime, endTime, days, clinicId } = req.body; // customSchedule removed
     try {
-        await db.query("INSERT INTO receptionist_invitations (doctor_id, clinic_id, start_time, end_time, days, custom_schedule) VALUES ($1, $2, $3, $4, $5, $6)",
-            [doctorId, clinicId, startTime, endTime, days.join(','), customSchedule]);
+        // "custom_schedule" and its value ($6) have been removed from the query
+        await db.query("INSERT INTO receptionist_invitations (doctor_id, clinic_id, start_time, end_time, days) VALUES ($1, $2, $3, $4, $5)",
+            [doctorId, clinicId, startTime, endTime, days.join(',')]);
         res.json({ success: true });
     } catch (err) {
+        console.error("Error in /api/receptionist/invite-doctor:", err); 
         res.status(500).json({ success: false, message: 'Error inviting doctor.' });
     }
 });
@@ -257,6 +260,31 @@ app.post("/api/receptionist/delete-doctor", async (req, res) => {
 });
 
 // --- Doctor Actions ---
+
+app.post("/api/doctor/handle-invitation", async (req, res) => {
+    const { invitationId, action } = req.body;
+    try {
+        if (action === 'accept') {
+            const invitation = await db.query("SELECT * FROM receptionist_invitations WHERE id = $1", [invitationId]).then(r => r.rows[0]);
+            if (invitation) {
+                await db.query("INSERT INTO doctor_schedules (doctor_id, clinic_id, start_time, end_time, days) VALUES ($1, $2, $3, $4, $5)",
+                    [invitation.doctor_id, invitation.clinic_id, invitation.start_time, invitation.end_time, invitation.days]);
+                await db.query("DELETE FROM receptionist_invitations WHERE id = $1", [invitationId]);
+                 res.json({ success: true, message: 'Invitation accepted.' });
+            } else {
+                 res.status(404).json({ success: false, message: 'Invitation not found.' });
+            }
+        } else if (action === 'delete') {
+            await db.query("DELETE FROM receptionist_invitations WHERE id = $1", [invitationId]);
+            res.json({ success: true, message: 'Invitation deleted.' });
+        } else {
+            res.status(400).json({ success: false, message: 'Invalid action.' });
+        }
+    } catch (err) {
+        console.error("Error handling invitation:", err);
+        res.status(500).json({ success: false, message: 'Error handling invitation.' });
+    }
+});
 app.post("/api/doctor/next-patient", async (req, res) => {
     const { doctorId, clinicId } = req.body;
     const today = new Date().toISOString().slice(0, 10);
@@ -374,6 +402,28 @@ app.post("/api/doctor/:doctorId/queue/reset", async (req, res) => {
     } catch (err) {
         console.error("Error resetting queue:", err);
         res.status(500).json({ success: false, message: "Error resetting queue." });
+    }
+});
+
+app.post("/api/doctor/delete-clinic", async (req, res) => {
+    const { doctorId, clinicId } = req.body;
+    try {
+        await db.query("DELETE FROM doctor_schedules WHERE doctor_id = $1 AND clinic_id = $2", [doctorId, clinicId]);
+        res.json({ success: true, message: 'Clinic schedule deleted successfully.' });
+    } catch (err) {
+        console.error("Error deleting clinic schedule:", err);
+        res.status(500).json({ success: false, message: 'Error deleting clinic from schedule.' });
+    }
+});
+
+app.delete("/api/appointments/:appointmentId", async (req, res) => {
+    const { appointmentId } = req.params;
+    try {
+        await db.query("DELETE FROM appointments WHERE id = $1", [appointmentId]);
+        res.json({ success: true, message: "Appointment cancelled successfully." });
+    } catch (err) {
+        console.error("Error cancelling appointment:", err);
+        res.status(500).json({ success: false, message: "Error cancelling appointment." });
     }
 });
 
