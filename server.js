@@ -77,10 +77,10 @@ app.get("/api/dashboard/:role/:userId", async (req, res) => {
         } else if (role === 'doctor') {
             const today = new Date().toISOString().slice(0, 10);
             
-            let appointmentsQuery = "SELECT a.*, p.dob FROM appointments a JOIN patients p ON a.patient_id = p.id WHERE a.doctor_id = $1 AND a.date >= $2 ORDER BY a.date ASC, a.queue_number ASC";
+            let appointmentsQuery = "SELECT a.*, p.dob FROM appointments a JOIN patients p ON a.patient_id = p.id WHERE a.doctor_id = $1 AND a.date = $2 ORDER BY a.queue_number ASC";
             let appointmentsParams = [userId, today];
             if (clinicId) {
-                appointmentsQuery = "SELECT a.*, p.dob FROM appointments a JOIN patients p ON a.patient_id = p.id WHERE a.doctor_id = $1 AND a.date >= $2 AND a.clinic_id = $3 ORDER BY a.date ASC, a.queue_number ASC";
+                appointmentsQuery = "SELECT a.*, p.dob FROM appointments a JOIN patients p ON a.patient_id = p.id WHERE a.doctor_id = $1 AND a.date = $2 AND a.clinic_id = $3 ORDER BY a.queue_number ASC";
                 appointmentsParams.push(clinicId);
             }
             
@@ -124,31 +124,23 @@ app.get("/api/dashboard/:role/:userId", async (req, res) => {
 
 // --- Search and General GET ---
 app.get("/api/doctors", async (req, res) => {
-    const { name, specialty, clinic, date } = req.query;
+    const { name, specialty, clinic } = req.query;
     try {
-        const dayOfWeek = new Date(date).toLocaleDateString('en-US', { weekday: 'long' });
-
-        let query = `SELECT DISTINCT d.id, d.name, d.specialty, d.phone 
-                     FROM doctors d 
-                     LEFT JOIN doctor_schedules ds ON d.id = ds.doctor_id 
-                     LEFT JOIN clinics c ON ds.clinic_id = c.id 
-                     WHERE ds.days LIKE $1`;
-        let params = [`%${dayOfWeek}%`];
-        let i = 2;
+        let query = `SELECT DISTINCT d.id, d.name, d.specialty, d.phone FROM doctors d LEFT JOIN doctor_schedules ds ON d.id = ds.doctor_id LEFT JOIN clinics c ON ds.clinic_id = c.id WHERE 1=1`;
+        let params = [];
+        let i = 1;
         if (name) { query += ` AND d.name ILIKE $${i++}`; params.push(`%${name}%`); }
         if (specialty) { query += ` AND d.specialty ILIKE $${i++}`; params.push(`%${specialty}%`); }
         if (clinic) { query += ` AND c.name ILIKE $${i++}`; params.push(`%${clinic}%`); }
         query += " ORDER BY d.name";
         
         const doctorsResult = await db.query(query, params);
-        
         for (let doctor of doctorsResult.rows) {
-            const scheduleRes = await db.query(`SELECT ds.*, c.name as clinic_name FROM doctor_schedules ds JOIN clinics c ON ds.clinic_id = c.id WHERE ds.doctor_id = $1 AND ds.days LIKE $2`, [doctor.id, `%${dayOfWeek}%`]);
+            const scheduleRes = await db.query(`SELECT ds.*, c.name as clinic_name FROM doctor_schedules ds JOIN clinics c ON ds.clinic_id = c.id WHERE ds.doctor_id = $1`, [doctor.id]);
             doctor.schedules = scheduleRes.rows;
         }
         res.json({ success: true, doctors: doctorsResult.rows });
     } catch (err) {
-        console.error("Doctor search error:", err);
         res.status(500).json({ success: false, message: "Error searching doctors." });
     }
 });
@@ -166,13 +158,6 @@ app.get("/api/clinics/search", async (req, res) => {
 // --- Appointment Booking ---
 app.post("/api/appointments/book", async (req, res) => {
     const { patientId, doctorId, clinicId, date } = req.body;
-
-    // Server-side validation for past dates
-    const today = new Date().toLocaleDateString('en-CA'); // Gets date in YYYY-MM-DD format
-    if (date < today) {
-        return res.status(400).json({ success: false, message: "Cannot book appointments for past dates." });
-    }
-
     try {
         const [doctor, patient, clinic, schedule] = await Promise.all([
             db.query("SELECT * FROM doctors WHERE id = $1", [doctorId]).then(r => r.rows[0]),
@@ -201,8 +186,6 @@ app.post("/api/appointments/book", async (req, res) => {
         res.status(500).json({ success: false, message: "Error booking appointment." });
     }
 });
-
-// --- All other routes (receptionist, doctor, admin actions) remain the same... ---
 
 // --- Receptionist Actions ---
 app.post("/api/receptionist/book", async (req, res) => {
@@ -593,30 +576,9 @@ app.post('/api/admin/patients', async (req, res) => {
     } catch (err) {
         res.status(500).json({ success: false, message: 'Error adding patient.' });
     }
-});
-
-// --- Scheduled Tasks ---
-async function deleteOldAppointments() {
-    console.log('Running scheduled job to delete old appointments...');
-    try {
-        // Deletes appointments with a date before today.
-        const result = await db.query("DELETE FROM appointments WHERE date < CURRENT_DATE");
-        if (result.rowCount > 0) {
-            console.log(`Successfully deleted ${result.rowCount} old appointments.`);
-        } else {
-            console.log('No old appointments to delete.');
-        }
-    } catch (err) {
-        console.error('Error during scheduled deletion of old appointments:', err);
-    }
-}
-
-// Run the cleanup task every 24 hours.
-setInterval(deleteOldAppointments, 24 * 60 * 60 * 1000); 
-// Also run it once on server startup.
-deleteOldAppointments();
-           
+});           
 // --- Server ---
 app.listen(port, () => {
+   
     console.log(`Backend server running on http://localhost:${port}`);
 });
