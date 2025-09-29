@@ -563,7 +563,7 @@ app.post('/api/admin/patients', async (req, res) => {
     } catch (err) {
         res.status(500).json({ success: false, message: 'Error adding patient.' });
     }
-});           
+});
 // --- Server ---
 app.listen(port, () => {
    
