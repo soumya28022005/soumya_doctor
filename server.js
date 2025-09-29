@@ -487,7 +487,7 @@ app.post("/api/receptionist/add-patient-and-book", async (req, res) => {
     try {
         const newPatient = await db.query(
             "INSERT INTO patients (name, dob, username, password) VALUES ($1, $2, $3, $4) RETURNING *",
-            [patientName, new Date(new Date().setFullYear(new Date().getFullYear() - patientAge)), `${patientName.replace(/\s/g, '').toLowerCase()}${patientAge}`, 'password123']
+            [patientName, new Date(new Date().setFullYear(new Date().getFullYear() - patientAge)), `${patientName.replace(/\s/g, '').toLowerCase()}${patientAge}${Date.now()}`, 'password123']
         ).then(r => r.rows[0]);
 
         const [doctor, clinic, schedule] = await Promise.all([
@@ -563,7 +563,7 @@ app.post('/api/admin/patients', async (req, res) => {
     } catch (err) {
         res.status(500).json({ success: false, message: 'Error adding patient.' });
     }
-});
+});           
 // --- Server ---
 app.listen(port, () => {
    
