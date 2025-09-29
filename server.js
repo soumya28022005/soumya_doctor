@@ -481,6 +481,19 @@ app.delete("/api/appointments/:appointmentId", async (req, res) => {
     }
 });
 
+app.post("/api/appointments/:appointmentId/status", async (req, res) => {
+    const { appointmentId } = req.params;
+    const { status } = req.body;
+    try {
+        await db.query("UPDATE appointments SET status = $1 WHERE id = $2", [status, appointmentId]);
+        res.json({ success: true, message: "Appointment status updated." });
+    } catch (err) {
+        console.error("Error updating appointment status:", err);
+        res.status(500).json({ success: false, message: "Error updating status." });
+    }
+});
+
+
 app.post("/api/receptionist/add-patient-and-book", async (req, res) => {
     const { patientName, patientAge, doctorId, clinicId } = req.body;
     const today = new Date().toISOString().slice(0, 10);
