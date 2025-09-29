@@ -72,15 +72,15 @@ app.get("/api/dashboard/:role/:userId", async (req, res) => {
         let data = { success: true, [role]: userRes.rows[0] };
 
         if (role === 'patient') {
-            const appointmentsRes = await db.query("SELECT * FROM appointments WHERE patient_id = $1 ORDER BY date DESC, time ASC", [userId]);
+            const appointmentsRes = await db.query("SELECT a.*, p.dob FROM appointments a JOIN patients p ON a.patient_id = p.id WHERE a.patient_id = $1 ORDER BY a.date DESC, a.time ASC", [userId]);
             data.appointments = appointmentsRes.rows;
         } else if (role === 'doctor') {
             const today = new Date().toISOString().slice(0, 10);
             
-            let appointmentsQuery = "SELECT * FROM appointments WHERE doctor_id = $1 AND date = $2 ORDER BY queue_number ASC";
+            let appointmentsQuery = "SELECT a.*, p.dob FROM appointments a JOIN patients p ON a.patient_id = p.id WHERE a.doctor_id = $1 AND a.date = $2 ORDER BY a.queue_number ASC";
             let appointmentsParams = [userId, today];
             if (clinicId) {
-                appointmentsQuery = "SELECT * FROM appointments WHERE doctor_id = $1 AND date = $2 AND clinic_id = $3 ORDER BY queue_number ASC";
+                appointmentsQuery = "SELECT a.*, p.dob FROM appointments a JOIN patients p ON a.patient_id = p.id WHERE a.doctor_id = $1 AND a.date = $2 AND a.clinic_id = $3 ORDER BY a.queue_number ASC";
                 appointmentsParams.push(clinicId);
             }
             
@@ -108,8 +108,8 @@ app.get("/api/dashboard/:role/:userId", async (req, res) => {
              const [patientsRes, doctorsRes, clinicsRes, appointmentsRes, receptionistsRes] = await Promise.all([
                 db.query("SELECT * FROM patients ORDER BY name"),
                 db.query("SELECT * FROM doctors ORDER BY name"),
-                db.query("SELECT * FROM clinics ORDER BY name"),
-                db.query("SELECT * FROM appointments ORDER BY date DESC"),
+                db.query("SELECT c.*, r.name as receptionist_name, r.username as receptionist_username, r.password as receptionist_password FROM clinics c LEFT JOIN receptionists r ON c.id = r.clinic_id ORDER BY c.name"),
+                db.query("SELECT a.*, p.name as patient_name, d.name as doctor_name FROM appointments a LEFT JOIN patients p ON a.patient_id = p.id JOIN doctors d ON a.doctor_id = d.id ORDER BY a.date DESC"),
                 db.query("SELECT * FROM receptionists ORDER BY name")
             ]);
             data = { ...data, patients: patientsRes.rows, doctors: doctorsRes.rows, clinics: clinicsRes.rows, appointments: appointmentsRes.rows, receptionists: receptionistsRes.rows };
@@ -486,8 +486,8 @@ app.post("/api/receptionist/add-patient-and-book", async (req, res) => {
     const today = new Date().toISOString().slice(0, 10);
     try {
         const newPatient = await db.query(
-            "INSERT INTO patients (name, dob) VALUES ($1, $2) RETURNING *",
-            [patientName, new Date(new Date().setFullYear(new Date().getFullYear() - patientAge))]
+            "INSERT INTO patients (name, dob, username, password) VALUES ($1, $2, $3, $4) RETURNING *",
+            [patientName, new Date(new Date().setFullYear(new Date().getFullYear() - patientAge)), `${patientName.replace(/\s/g, '').toLowerCase()}${patientAge}`, 'password123']
         ).then(r => r.rows[0]);
 
         const [doctor, clinic, schedule] = await Promise.all([
@@ -510,6 +510,60 @@ app.post("/api/receptionist/add-patient-and-book", async (req, res) => {
         res.status(500).json({ success: false, message: "Error booking appointment." });
     }
 });
+
+// --- Admin Actions ---
+app.post('/api/admin/clinics', async (req, res) => {
+    const { name, address, receptionist_name, receptionist_username, receptionist_password } = req.body;
+    try {
+        const newClinic = await db.query(
+            "INSERT INTO clinics (name, address) VALUES ($1, $2) RETURNING *",
+            [name, address]
+        ).then(r => r.rows[0]);
+
+        if (receptionist_name && receptionist_username && receptionist_password) {
+            await db.query(
+                "INSERT INTO receptionists (name, username, password, clinic_id) VALUES ($1, $2, $3, $4)",
+                [receptionist_name, receptionist_username, receptionist_password, newClinic.id]
+            );
+        }
+
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ success: false, message: 'Error adding clinic.' });
+    }
+});
+
+app.post('/api/admin/doctors', async (req, res) => {
+    const { name, specialty, username, password, phone, clinicId, startTime, endTime, days } = req.body;
+    try {
+        const newDoctor = await db.query(
+            "INSERT INTO doctors (name, specialty, username, password, phone) VALUES ($1, $2, $3, $4, $5) RETURNING *",
+            [name, specialty, username, password, phone]
+        ).then(r => r.rows[0]);
+
+        if (clinicId && startTime && endTime && days) {
+            await db.query(
+                "INSERT INTO doctor_schedules (doctor_id, clinic_id, start_time, end_time, days) VALUES ($1, $2, $3, $4, $5)",
+                [newDoctor.id, clinicId, startTime, endTime, days.join(',')]
+            );
+        }
+
+        res.json({ success: true });
+    } catch (err) {
+        console.error("Error in /api/admin/add-doctor:", err);
+        res.status(500).json({ success: false, message: 'Error adding doctor.' });
+    }
+});
+
+app.post('/api/admin/patients', async (req, res) => {
+    const { name, dob, username, password, mobile } = req.body;
+    try {
+        await db.query("INSERT INTO patients (name, dob, username, password, mobile) VALUES ($1, $2, $3, $4, $5)", [name, dob, username, password, mobile]);
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ success: false, message: 'Error adding patient.' });
+    }
+});           
 // --- Server ---
 app.listen(port, () => {
    
