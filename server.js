@@ -29,6 +29,7 @@ async function getNextQueueNumber(doctorId, date, clinicId) {
 
 // --- API ROUTES ---
 
+
 // --- Auth ---
 app.post("/api/login/:role", async (req, res) => {
     const { role } = req.params;
