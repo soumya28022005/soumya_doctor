@@ -27,7 +27,6 @@ async function getNextQueueNumber(doctorId, date, clinicId) {
     return parseInt(result.rows[0].count) + 1;
 }
 
-
 // --- API ROUTES ---
 
 // --- Auth ---
@@ -50,13 +49,23 @@ app.post("/api/login/:role", async (req, res) => {
 app.post("/api/signup/patient", async (req, res) => {
     const { name, dob, mobile, username, password } = req.body;
     try {
+        const existingPatientByMobile = await db.query("SELECT id FROM patients WHERE mobile = $1", [mobile]);
+        if (existingPatientByMobile.rows.length > 0) {
+            return res.status(400).json({ success: false, message: "This mobile number is already registered." });
+        }
+        const existingPatientByUsername = await db.query("SELECT id FROM patients WHERE username = $1", [username]);
+        if (existingPatientByUsername.rows.length > 0) {
+            return res.status(400).json({ success: false, message: "This username is already taken." });
+        }
+
         const result = await db.query(
             "INSERT INTO patients (name, dob, mobile, username, password) VALUES ($1, $2, $3, $4, $5) RETURNING *",
             [name, dob, mobile, username, password]
         );
         res.json({ success: true, user: result.rows[0] });
     } catch (err) {
-        res.status(500).json({ success: false, message: "Username may already be taken." });
+        console.error("Signup Error:", err);
+        res.status(500).json({ success: false, message: "An error occurred during signup." });
     }
 });
 
@@ -146,9 +155,23 @@ app.get("/api/doctors", async (req, res) => {
         const doctorsResult = await db.query(query, params);
         
         for (let doctor of doctorsResult.rows) {
-            const dayOfWeek = new Date(date).toLocaleString('en-us', { weekday: 'long' });
-            const scheduleRes = await db.query(`SELECT ds.*, c.name as clinic_name FROM doctor_schedules ds JOIN clinics c ON ds.clinic_id = c.id WHERE ds.doctor_id = $1 AND ds.days LIKE $2`, [doctor.id, `%${dayOfWeek}%`]);
-            doctor.schedules = scheduleRes.rows;
+            if (date) {
+                const searchDate = new Date(date);
+                const dayOfWeek = searchDate.toLocaleString('en-us', { weekday: 'long' }); // "Tuesday"
+                const dateOfMonth = searchDate.getDate().toString(); // "30"
+
+                const scheduleRes = await db.query(
+                    `SELECT ds.*, c.name as clinic_name FROM doctor_schedules ds JOIN clinics c ON ds.clinic_id = c.id
+                     WHERE ds.doctor_id = $1 AND (
+                        (ds.days NOT LIKE 'DATE:%' AND $2 = ANY(string_to_array(ds.days, ','))) OR
+                        (ds.days LIKE 'DATE:%' AND $3 = ANY(string_to_array(substring(ds.days from 6), ',')))
+                     )`,
+                    [doctor.id, dayOfWeek, dateOfMonth]
+                );
+                doctor.schedules = scheduleRes.rows;
+            } else {
+                doctor.schedules = [];
+            }
 
             if (date && doctor.daily_patient_limit > 0) {
                 const appointmentCountRes = await db.query("SELECT COUNT(*) FROM appointments WHERE doctor_id = $1 AND date = $2", [doctor.id, date]);
@@ -196,7 +219,6 @@ app.get('/api/appointments/clinic/:clinicId', async (req, res) => {
 app.post("/api/appointments/book", async (req, res) => {
     const { patientId, doctorId, clinicId, date } = req.body;
     try {
-        // *** NEW: Check for existing appointment for the same patient, doctor, and date ***
         const existingAppointment = await db.query(
             "SELECT id FROM appointments WHERE patient_id = $1 AND doctor_id = $2 AND date = $3",
             [patientId, doctorId, date]
@@ -263,7 +285,7 @@ app.post("/api/receptionist/add-doctor", async (req, res) => {
         await client.query('BEGIN');
         const newDoctorRes = await client.query("INSERT INTO doctors (name, specialty, username, password, phone) VALUES ($1, $2, $3, $4, $5) RETURNING *", [name, specialty, username, password, Phonenumber]);
         const newDoctor = newDoctorRes.rows[0];
-        await client.query("INSERT INTO doctor_schedules (doctor_id, clinic_id, start_time, end_time, days) VALUES ($1, $2, $3, $4, $5)", [newDoctor.id, clinicId, startTime, endTime, days.join(',')]);
+        await client.query("INSERT INTO doctor_schedules (doctor_id, clinic_id, start_time, end_time, days) VALUES ($1, $2, $3, $4, $5)", [newDoctor.id, clinicId, startTime, endTime, days]);
         await client.query('COMMIT');
         res.json({ success: true, message: 'Doctor added successfully.' });
     } catch (err) {
@@ -278,7 +300,7 @@ app.post("/api/receptionist/add-doctor", async (req, res) => {
 app.post("/api/receptionist/invite-doctor", async (req, res) => {
     const { doctorId, startTime, endTime, days, clinicId } = req.body;
     try {
-        await db.query("INSERT INTO receptionist_invitations (doctor_id, clinic_id, start_time, end_time, days) VALUES ($1, $2, $3, $4, $5)", [doctorId, clinicId, startTime, endTime, days.join(',')]);
+        await db.query("INSERT INTO receptionist_invitations (doctor_id, clinic_id, start_time, end_time, days) VALUES ($1, $2, $3, $4, $5)", [doctorId, clinicId, startTime, endTime, days]);
         res.json({ success: true });
     } catch (err) {
         console.error("Error in /api/receptionist/invite-doctor:", err); 
@@ -302,7 +324,7 @@ app.post("/api/doctor/join-clinic", async (req, res) => {
     try {
         const existingRequest = await db.query( "SELECT * FROM clinic_join_requests WHERE doctor_id = $1 AND clinic_id = $2 AND status = 'pending'", [doctorId, clinicId]);
         if (existingRequest.rows.length > 0) return res.json({ success: false, message: "You have already sent a join request to this clinic." });
-        await db.query("INSERT INTO clinic_join_requests (doctor_id, clinic_id, start_time, end_time, days, status) VALUES ($1, $2, $3, $4, $5, 'pending') RETURNING *", [doctorId, clinicId, startTime, endTime, days.join(',')]);
+        await db.query("INSERT INTO clinic_join_requests (doctor_id, clinic_id, start_time, end_time, days, status) VALUES ($1, $2, $3, $4, $5, 'pending') RETURNING *", [doctorId, clinicId, startTime, endTime, days]);
         res.json({ success: true, message: "Join request sent successfully." });
     } catch (err) {
         console.error("Error sending join request:", err);
@@ -314,7 +336,7 @@ app.post("/api/doctor/create-clinic", async (req, res) => {
     const { doctorId, name, address, startTime, endTime, days } = req.body;
     try {
         const newClinic = await db.query("INSERT INTO clinics (name, address) VALUES ($1, $2) RETURNING *", [name, address]).then(r => r.rows[0]);
-        await db.query("INSERT INTO doctor_schedules (doctor_id, clinic_id, start_time, end_time, days) VALUES ($1, $2, $3, $4, $5)", [doctorId, newClinic.id, startTime, endTime, days.join(',')]);
+        await db.query("INSERT INTO doctor_schedules (doctor_id, clinic_id, start_time, end_time, days) VALUES ($1, $2, $3, $4, $5)", [doctorId, newClinic.id, startTime, endTime, days]);
         res.json({ success: true, message: "Private clinic created and added to your schedule." });
     } catch (err) {
         console.error("Error creating private clinic:", err);
@@ -502,7 +524,7 @@ app.post('/api/admin/doctors', async (req, res) => {
     try {
         const newDoctor = await db.query("INSERT INTO doctors (name, specialty, username, password, phone) VALUES ($1, $2, $3, $4, $5) RETURNING *", [name, specialty, username, password, phone]).then(r => r.rows[0]);
         if (clinicId && startTime && endTime && days) {
-            await db.query("INSERT INTO doctor_schedules (doctor_id, clinic_id, start_time, end_time, days) VALUES ($1, $2, $3, $4, $5)", [newDoctor.id, clinicId, startTime, endTime, days.join(',')]);
+            await db.query("INSERT INTO doctor_schedules (doctor_id, clinic_id, start_time, end_time, days) VALUES ($1, $2, $3, $4, $5)", [newDoctor.id, clinicId, startTime, endTime, days]);
         }
         res.json({ success: true });
     } catch (err) {
