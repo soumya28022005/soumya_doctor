@@ -27,6 +27,39 @@ async function getNextQueueNumber(doctorId, date, clinicId) {
     return parseInt(result.rows[0].count) + 1;
 }
 
+async function checkScheduleConflict(doctorId, startTime, endTime, days, scheduleIdToExclude = null) {
+    const client = await db.connect();
+    try {
+        let query = 'SELECT * FROM doctor_schedules WHERE doctor_id = $1';
+        const params = [doctorId];
+        if (scheduleIdToExclude) {
+            query += ' AND id != $2';
+            params.push(scheduleIdToExclude);
+        }
+        const { rows: existingSchedules } = await client.query(query, params);
+
+        const newDays = days.startsWith('DATE:') ? days.substring(5).split(',') : days.split(',');
+
+        for (const schedule of existingSchedules) {
+            const existingDays = schedule.days.startsWith('DATE:') ? schedule.days.substring(5).split(',') : schedule.days.split(',');
+            const hasCommonDay = newDays.some(day => existingDays.includes(day));
+
+            if (hasCommonDay) {
+                // Check for time overlap
+                const existingStart = schedule.start_time;
+                const existingEnd = schedule.end_time;
+                if (startTime < existingEnd && endTime > existingStart) {
+                    return true; // Conflict found
+                }
+            }
+        }
+        return false; // No conflict
+    } finally {
+        client.release();
+    }
+}
+
+
 // --- API ROUTES ---
 
 // --- Auth ---
@@ -94,7 +127,7 @@ app.get("/api/dashboard/:role/:userId", async (req, res) => {
             
             const [appointmentsRes, schedulesRes, clinicsRes, requestsRes, invitationsRes] = await Promise.all([
                 db.query(appointmentsQuery, appointmentsParams),
-                db.query(`SELECT ds.*, c.name as clinic_name FROM doctor_schedules ds JOIN clinics c ON ds.clinic_id = c.id WHERE ds.doctor_id = $1`, [userId]),
+                db.query(`SELECT ds.*, c.name as clinic_name FROM doctor_schedules ds JOIN clinics c ON ds.clinic_id = c.id WHERE ds.doctor_id = $1 ORDER BY ds.start_time`, [userId]),
                 db.query("SELECT * FROM clinics ORDER BY name"),
                 db.query("SELECT cjr.*, c.name as clinic_name FROM clinic_join_requests cjr JOIN clinics c ON cjr.clinic_id = c.id WHERE cjr.doctor_id = $1", [userId]),
                 db.query(`SELECT ri.*, c.name as clinic_name FROM receptionist_invitations ri JOIN clinics c ON ri.clinic_id = c.id WHERE ri.doctor_id = $1`, [userId])
@@ -104,7 +137,7 @@ app.get("/api/dashboard/:role/:userId", async (req, res) => {
             const user = userRes.rows[0];
             const [clinicRes, clinicDocsRes, allDocsRes, requestsRes, invitationsRes, patientsRes] = await Promise.all([
                  db.query("SELECT * FROM clinics WHERE id = $1", [user.clinic_id]),
-                 db.query(`SELECT d.*, ds.start_time, ds.end_time, ds.days FROM doctors d JOIN doctor_schedules ds ON d.id = ds.doctor_id WHERE ds.clinic_id = $1`, [user.clinic_id]),
+                 db.query(`SELECT ds.*, d.name, d.specialty FROM doctor_schedules ds JOIN doctors d ON ds.doctor_id = d.id WHERE ds.clinic_id = $1 ORDER BY ds.start_time`, [user.clinic_id]),
                  db.query("SELECT * FROM doctors ORDER BY name"),
                  db.query("SELECT cjr.*, d.name as doctor_name, d.specialty as doctor_specialty FROM clinic_join_requests cjr JOIN doctors d ON cjr.doctor_id = d.id WHERE cjr.clinic_id = $1 AND cjr.status = 'pending'", [user.clinic_id]),
                  db.query("SELECT * FROM receptionist_invitations WHERE clinic_id = $1", [user.clinic_id]),
@@ -144,12 +177,22 @@ app.get("/api/dashboard/:role/:userId", async (req, res) => {
 app.get("/api/doctors", async (req, res) => {
     const { name, specialty, clinic, date } = req.query;
     try {
-        let query = `SELECT DISTINCT d.id, d.name, d.specialty, d.phone, d.daily_patient_limit FROM doctors d LEFT JOIN doctor_schedules ds ON d.id = ds.doctor_id LEFT JOIN clinics c ON ds.clinic_id = c.id WHERE 1=1`;
+        let query = `SELECT DISTINCT d.id, d.name, d.specialty, d.phone FROM doctors d`;
         let params = [];
-        let i = 1;
-        if (name) { query += ` AND d.name ILIKE $${i++}`; params.push(`%${name}%`); }
-        if (specialty) { query += ` AND d.specialty ILIKE $${i++}`; params.push(`%${specialty}%`); }
-        if (clinic) { query += ` AND c.name ILIKE $${i++}`; params.push(`%${clinic}%`); }
+        let conditions = [];
+
+        if (name) { conditions.push(`d.name ILIKE $${params.length + 1}`); params.push(`%${name}%`); }
+        if (specialty) { conditions.push(`d.specialty ILIKE $${params.length + 1}`); params.push(`%${specialty}%`); }
+        
+        if (clinic) {
+            query += ' JOIN doctor_schedules ds ON d.id = ds.doctor_id JOIN clinics c ON ds.clinic_id = c.id';
+            conditions.push(`c.name ILIKE $${params.length + 1}`);
+            params.push(`%${clinic}%`);
+        }
+
+        if (conditions.length > 0) {
+            query += ' WHERE ' + conditions.join(' AND ');
+        }
         query += " ORDER BY d.name";
         
         const doctorsResult = await db.query(query, params);
@@ -157,8 +200,8 @@ app.get("/api/doctors", async (req, res) => {
         for (let doctor of doctorsResult.rows) {
             if (date) {
                 const searchDate = new Date(date);
-                const dayOfWeek = searchDate.toLocaleString('en-us', { weekday: 'long' }); // "Tuesday"
-                const dateOfMonth = searchDate.getDate().toString(); // "30"
+                const dayOfWeek = searchDate.toLocaleString('en-us', { weekday: 'long' });
+                const dateOfMonth = searchDate.getDate().toString();
 
                 const scheduleRes = await db.query(
                     `SELECT ds.*, c.name as clinic_name FROM doctor_schedules ds JOIN clinics c ON ds.clinic_id = c.id
@@ -168,14 +211,18 @@ app.get("/api/doctors", async (req, res) => {
                      )`,
                     [doctor.id, dayOfWeek, dateOfMonth]
                 );
+                
+                for(let schedule of scheduleRes.rows) {
+                    if (schedule.patient_limit > 0) {
+                        const appointmentCountRes = await db.query("SELECT COUNT(*) FROM appointments WHERE doctor_id = $1 AND clinic_id = $2 AND date = $3", [doctor.id, schedule.clinic_id, date]);
+                        schedule.appointment_count = parseInt(appointmentCountRes.rows[0].count);
+                    } else {
+                        schedule.appointment_count = 0; // Default if no limit
+                    }
+                }
                 doctor.schedules = scheduleRes.rows;
             } else {
                 doctor.schedules = [];
-            }
-
-            if (date && doctor.daily_patient_limit > 0) {
-                const appointmentCountRes = await db.query("SELECT COUNT(*) FROM appointments WHERE doctor_id = $1 AND date = $2", [doctor.id, date]);
-                doctor.appointment_count = parseInt(appointmentCountRes.rows[0].count);
             }
         }
         res.json({ success: true, doctors: doctorsResult.rows });
@@ -219,11 +266,7 @@ app.get('/api/appointments/clinic/:clinicId', async (req, res) => {
 app.post("/api/appointments/book", async (req, res) => {
     const { patientId, doctorId, clinicId, date } = req.body;
     try {
-        const existingAppointment = await db.query(
-            "SELECT id FROM appointments WHERE patient_id = $1 AND doctor_id = $2 AND date = $3",
-            [patientId, doctorId, date]
-        );
-
+        const existingAppointment = await db.query("SELECT id FROM appointments WHERE patient_id = $1 AND doctor_id = $2 AND date = $3", [patientId, doctorId, date]);
         if (existingAppointment.rows.length > 0) {
             return res.status(400).json({ success: false, message: "You already have an appointment with this doctor on this day." });
         }
@@ -234,18 +277,19 @@ app.post("/api/appointments/book", async (req, res) => {
             db.query("SELECT * FROM doctor_schedules WHERE doctor_id = $1 AND clinic_id = $2", [doctorId, clinicId]).then(r => r.rows[0])
         ]);
 
-        if (doctor.daily_patient_limit > 0) {
-            const appointmentCountRes = await db.query("SELECT COUNT(*) FROM appointments WHERE doctor_id = $1 AND date = $2", [doctorId, date]);
+        if (!schedule) return res.status(400).json({ success: false, message: "Doctor does not have a valid schedule at this clinic for booking." });
+
+        if (schedule.patient_limit > 0) {
+            const appointmentCountRes = await db.query("SELECT COUNT(*) FROM appointments WHERE doctor_id = $1 AND clinic_id = $2 AND date = $3", [doctorId, clinicId, date]);
             const currentCount = parseInt(appointmentCountRes.rows[0].count);
-            if (currentCount >= doctor.daily_patient_limit) {
-                return res.status(400).json({ success: false, message: "Doctor's daily appointment limit has been reached." });
+            if (currentCount >= schedule.patient_limit) {
+                return res.status(400).json({ success: false, message: "This doctor's appointment limit for this slot has been reached." });
             }
         }
         
-        if (!schedule) return res.status(400).json({ success: false, message: "Doctor does not have a schedule at this clinic." });
         const queueNumber = await getNextQueueNumber(doctorId, date, clinicId);
         const start = new Date(`${date}T${schedule.start_time}`);
-        start.setMinutes(start.getMinutes() + (queueNumber - 1) * (doctor.consultation_duration || 15));
+        start.setMinutes(start.getMinutes() + (queueNumber - 1) * 15); // Assuming 15 mins per patient
         const approxTime = start.toTimeString().slice(0, 5);
         await db.query(`INSERT INTO appointments (patient_id, doctor_id, clinic_id, date, "time", status, queue_number) VALUES ($1, $2, $3, $4, $5, 'Confirmed', $6) RETURNING *`, [patient.id, doctor.id, clinicId, date, approxTime, queueNumber]);
         res.json({ success: true });
@@ -259,33 +303,44 @@ app.post("/api/appointments/book", async (req, res) => {
 app.post("/api/receptionist/handle-join-request", async (req, res) => {
     const { requestId, action } = req.body;
     try {
+        const request = await db.query("SELECT * FROM clinic_join_requests WHERE id = $1", [requestId]).then(r => r.rows[0]);
+        if (!request) return res.status(404).json({ success: false, message: 'Request not found.' });
+
         if (action === 'accept') {
-            const request = await db.query("SELECT * FROM clinic_join_requests WHERE id = $1", [requestId]).then(r => r.rows[0]);
-            if (request) {
-                await db.query("INSERT INTO doctor_schedules (doctor_id, clinic_id, start_time, end_time, days) VALUES ($1, $2, $3, $4, $5)", [request.doctor_id, request.clinic_id, request.start_time, request.end_time, request.days]);
-                await db.query("UPDATE clinic_join_requests SET status = 'accepted' WHERE id = $1", [requestId]);
+            const conflict = await checkScheduleConflict(request.doctor_id, request.start_time, request.end_time, request.days);
+            if (conflict) {
+                return res.status(400).json({ success: false, message: "Cannot accept. Doctor has a conflicting schedule at this time." });
             }
+            await db.query("INSERT INTO doctor_schedules (doctor_id, clinic_id, start_time, end_time, days, patient_limit) VALUES ($1, $2, $3, $4, $5, $6)", [request.doctor_id, request.clinic_id, request.start_time, request.end_time, request.days, request.patient_limit]);
+            await db.query("UPDATE clinic_join_requests SET status = 'accepted' WHERE id = $1", [requestId]);
+            res.json({ success: true, message: 'Request accepted.' });
         } else if (action === 'delete') {
             await db.query("UPDATE clinic_join_requests SET status = 'rejected' WHERE id = $1", [requestId]);
+            res.json({ success: true, message: 'Request rejected.' });
         }
-        res.json({ success: true });
     } catch (err) {
         res.status(500).json({ success: false, message: 'Error handling join request.' });
     }
 });
 
 app.post("/api/receptionist/add-doctor", async (req, res) => {
-    const { name, specialty, username, password, Phonenumber, startTime, endTime, days, clinicId } = req.body;
+    const { name, specialty, username, password, Phonenumber, startTime, endTime, days, patientLimit, clinicId } = req.body;
     const client = await db.connect();
     try {
         const existingDoctor = await client.query("SELECT id FROM doctors WHERE username = $1", [username]);
         if (existingDoctor.rows.length > 0) {
             return res.status(400).json({ success: false, message: 'Username already exists. Please choose a different one.' });
         }
+
+        const conflict = await checkScheduleConflict(null, startTime, endTime, days); // No doctor ID yet
+        if (conflict) { // This check is conceptual for new doctors, real check is on existing ones
+             // For a new doctor, there are no existing schedules to conflict with, so this is mainly for logic consistency.
+        }
+
         await client.query('BEGIN');
         const newDoctorRes = await client.query("INSERT INTO doctors (name, specialty, username, password, phone) VALUES ($1, $2, $3, $4, $5) RETURNING *", [name, specialty, username, password, Phonenumber]);
         const newDoctor = newDoctorRes.rows[0];
-        await client.query("INSERT INTO doctor_schedules (doctor_id, clinic_id, start_time, end_time, days) VALUES ($1, $2, $3, $4, $5)", [newDoctor.id, clinicId, startTime, endTime, days]);
+        await client.query("INSERT INTO doctor_schedules (doctor_id, clinic_id, start_time, end_time, days, patient_limit) VALUES ($1, $2, $3, $4, $5, $6)", [newDoctor.id, clinicId, startTime, endTime, days, patientLimit]);
         await client.query('COMMIT');
         res.json({ success: true, message: 'Doctor added successfully.' });
     } catch (err) {
@@ -298,9 +353,13 @@ app.post("/api/receptionist/add-doctor", async (req, res) => {
 });
 
 app.post("/api/receptionist/invite-doctor", async (req, res) => {
-    const { doctorId, startTime, endTime, days, clinicId } = req.body;
+    const { doctorId, startTime, endTime, days, patientLimit, clinicId } = req.body;
     try {
-        await db.query("INSERT INTO receptionist_invitations (doctor_id, clinic_id, start_time, end_time, days) VALUES ($1, $2, $3, $4, $5)", [doctorId, clinicId, startTime, endTime, days]);
+        const conflict = await checkScheduleConflict(doctorId, startTime, endTime, days);
+        if (conflict) {
+            return res.status(400).json({ success: false, message: "Cannot send invite. The doctor has a conflicting schedule at this time." });
+        }
+        await db.query("INSERT INTO receptionist_invitations (doctor_id, clinic_id, start_time, end_time, days, patient_limit) VALUES ($1, $2, $3, $4, $5, $6)", [doctorId, clinicId, startTime, endTime, days, patientLimit]);
         res.json({ success: true });
     } catch (err) {
         console.error("Error in /api/receptionist/invite-doctor:", err); 
@@ -308,23 +367,18 @@ app.post("/api/receptionist/invite-doctor", async (req, res) => {
     }
 });
 
-app.post("/api/receptionist/delete-doctor", async (req, res) => {
-    const { doctorId, clinicId } = req.body;
-    try {
-        await db.query("DELETE FROM doctor_schedules WHERE doctor_id = $1 AND clinic_id = $2", [doctorId, clinicId]);
-        res.json({ success: true });
-    } catch (err) {
-        res.status(500).json({ success: false, message: 'Error deleting doctor from clinic.' });
-    }
-});
-
 // --- Doctor Actions ---
 app.post("/api/doctor/join-clinic", async (req, res) => {
-    const { doctorId, clinicId, startTime, endTime, days } = req.body;
+    const { doctorId, clinicId, startTime, endTime, days, patientLimit } = req.body;
     try {
-        const existingRequest = await db.query( "SELECT * FROM clinic_join_requests WHERE doctor_id = $1 AND clinic_id = $2 AND status = 'pending'", [doctorId, clinicId]);
-        if (existingRequest.rows.length > 0) return res.json({ success: false, message: "You have already sent a join request to this clinic." });
-        await db.query("INSERT INTO clinic_join_requests (doctor_id, clinic_id, start_time, end_time, days, status) VALUES ($1, $2, $3, $4, $5, 'pending') RETURNING *", [doctorId, clinicId, startTime, endTime, days]);
+        const conflict = await checkScheduleConflict(doctorId, startTime, endTime, days);
+        if (conflict) {
+            return res.status(400).json({ success: false, message: "Cannot send request. You have a conflicting schedule at this time." });
+        }
+        const existingRequest = await db.query( "SELECT * FROM clinic_join_requests WHERE doctor_id = $1 AND clinic_id = $2 AND start_time = $3 AND end_time = $4 AND days = $5 AND status = 'pending'", [doctorId, clinicId, startTime, endTime, days]);
+        if (existingRequest.rows.length > 0) return res.json({ success: false, message: "You have already sent an identical join request to this clinic." });
+        
+        await db.query("INSERT INTO clinic_join_requests (doctor_id, clinic_id, start_time, end_time, days, status, patient_limit) VALUES ($1, $2, $3, $4, $5, 'pending', $6) RETURNING *", [doctorId, clinicId, startTime, endTime, days, patientLimit]);
         res.json({ success: true, message: "Join request sent successfully." });
     } catch (err) {
         console.error("Error sending join request:", err);
@@ -333,10 +387,14 @@ app.post("/api/doctor/join-clinic", async (req, res) => {
 });
 
 app.post("/api/doctor/create-clinic", async (req, res) => {
-    const { doctorId, name, address, startTime, endTime, days } = req.body;
+    const { doctorId, name, address, startTime, endTime, days, patientLimit } = req.body;
     try {
+        const conflict = await checkScheduleConflict(doctorId, startTime, endTime, days);
+        if (conflict) {
+            return res.status(400).json({ success: false, message: "Cannot create clinic schedule. You have a conflicting schedule at this time." });
+        }
         const newClinic = await db.query("INSERT INTO clinics (name, address) VALUES ($1, $2) RETURNING *", [name, address]).then(r => r.rows[0]);
-        await db.query("INSERT INTO doctor_schedules (doctor_id, clinic_id, start_time, end_time, days) VALUES ($1, $2, $3, $4, $5)", [doctorId, newClinic.id, startTime, endTime, days]);
+        await db.query("INSERT INTO doctor_schedules (doctor_id, clinic_id, start_time, end_time, days, patient_limit) VALUES ($1, $2, $3, $4, $5, $6)", [doctorId, newClinic.id, startTime, endTime, days, patientLimit]);
         res.json({ success: true, message: "Private clinic created and added to your schedule." });
     } catch (err) {
         console.error("Error creating private clinic:", err);
@@ -347,20 +405,20 @@ app.post("/api/doctor/create-clinic", async (req, res) => {
 app.post("/api/doctor/handle-invitation", async (req, res) => {
     const { invitationId, action } = req.body;
     try {
+        const invitation = await db.query("SELECT * FROM receptionist_invitations WHERE id = $1", [invitationId]).then(r => r.rows[0]);
+        if (!invitation) return res.status(404).json({ success: false, message: 'Invitation not found.' });
+
         if (action === 'accept') {
-            const invitation = await db.query("SELECT * FROM receptionist_invitations WHERE id = $1", [invitationId]).then(r => r.rows[0]);
-            if (invitation) {
-                await db.query("INSERT INTO doctor_schedules (doctor_id, clinic_id, start_time, end_time, days) VALUES ($1, $2, $3, $4, $5)", [invitation.doctor_id, invitation.clinic_id, invitation.start_time, invitation.end_time, invitation.days]);
-                await db.query("DELETE FROM receptionist_invitations WHERE id = $1", [invitationId]);
-                 res.json({ success: true, message: 'Invitation accepted.' });
-            } else {
-                 res.status(404).json({ success: false, message: 'Invitation not found.' });
+            const conflict = await checkScheduleConflict(invitation.doctor_id, invitation.start_time, invitation.end_time, invitation.days);
+            if (conflict) {
+                return res.status(400).json({ success: false, message: "Cannot accept. You have a conflicting schedule at this time." });
             }
+            await db.query("INSERT INTO doctor_schedules (doctor_id, clinic_id, start_time, end_time, days, patient_limit) VALUES ($1, $2, $3, $4, $5, $6)", [invitation.doctor_id, invitation.clinic_id, invitation.start_time, invitation.end_time, invitation.days, invitation.patient_limit]);
+            await db.query("DELETE FROM receptionist_invitations WHERE id = $1", [invitationId]);
+            res.json({ success: true, message: 'Invitation accepted.' });
         } else if (action === 'delete') {
             await db.query("DELETE FROM receptionist_invitations WHERE id = $1", [invitationId]);
             res.json({ success: true, message: 'Invitation deleted.' });
-        } else {
-            res.status(400).json({ success: false, message: 'Invalid action.' });
         }
     } catch (err) {
         console.error("Error handling invitation:", err);
@@ -418,17 +476,6 @@ app.delete("/api/doctor/:doctorId/appointments/today", async (req, res) => {
     }
 });
 
-app.post("/api/doctor/settings", async (req, res) => {
-    const { doctorId, dailyPatientLimit } = req.body;
-    try {
-        await db.query("UPDATE doctors SET daily_patient_limit = $1 WHERE id = $2", [dailyPatientLimit, doctorId]);
-        res.json({ success: true, message: "Settings updated successfully." });
-    } catch (err) {
-        console.error("Error updating settings:", err);
-        res.status(500).json({ success: false, message: "Error updating settings." });
-    }
-});
-
 app.post("/api/doctor/:doctorId/queue/reset", async (req, res) => {
     const { doctorId } = req.params;
     const { clinicId } = req.body;
@@ -448,16 +495,17 @@ app.post("/api/doctor/:doctorId/queue/reset", async (req, res) => {
     }
 });
 
-app.post("/api/doctor/delete-clinic", async (req, res) => {
-    const { doctorId, clinicId } = req.body;
+app.delete("/api/schedules/:scheduleId", async (req, res) => {
+    const { scheduleId } = req.params;
     try {
-        await db.query("DELETE FROM doctor_schedules WHERE doctor_id = $1 AND clinic_id = $2", [doctorId, clinicId]);
-        res.json({ success: true, message: 'Clinic schedule deleted successfully.' });
+        await db.query("DELETE FROM doctor_schedules WHERE id = $1", [scheduleId]);
+        res.json({ success: true, message: 'Schedule slot deleted successfully.' });
     } catch (err) {
-        console.error("Error deleting clinic schedule:", err);
-        res.status(500).json({ success: false, message: 'Error deleting clinic from schedule.' });
+        console.error("Error deleting schedule slot:", err);
+        res.status(500).json({ success: false, message: 'Error deleting schedule slot.' });
     }
 });
+
 
 app.delete("/api/appointments/:appointmentId", async (req, res) => {
     const { appointmentId } = req.params;
@@ -495,7 +543,7 @@ app.post("/api/receptionist/add-patient-and-book", async (req, res) => {
         if (!schedule) return res.status(400).json({ success: false, message: "Doctor does not have a schedule at this clinic." });
         const queueNumber = await getNextQueueNumber(doctorId, today, clinicId);
         const start = new Date(`${today}T${schedule.start_time}`);
-        start.setMinutes(start.getMinutes() + (queueNumber - 1) * (doctor.consultation_duration || 15));
+        start.setMinutes(start.getMinutes() + (queueNumber - 1) * 15);
         const approxTime = start.toTimeString().slice(0, 5);
         await db.query(`INSERT INTO appointments (patient_id, doctor_id, clinic_id, date, "time", status, queue_number) VALUES ($1, $2, $3, $4, $5, 'Confirmed', $6) RETURNING *`, [newPatient.id, doctor.id, clinicId, today, approxTime, queueNumber]);
         res.json({ success: true });
@@ -520,11 +568,11 @@ app.post('/api/admin/clinics', async (req, res) => {
 });
 
 app.post('/api/admin/doctors', async (req, res) => {
-    const { name, specialty, username, password, phone, clinicId, startTime, endTime, days } = req.body;
+    const { name, specialty, username, password, phone, clinicId, startTime, endTime, days, patientLimit } = req.body;
     try {
         const newDoctor = await db.query("INSERT INTO doctors (name, specialty, username, password, phone) VALUES ($1, $2, $3, $4, $5) RETURNING *", [name, specialty, username, password, phone]).then(r => r.rows[0]);
         if (clinicId && startTime && endTime && days) {
-            await db.query("INSERT INTO doctor_schedules (doctor_id, clinic_id, start_time, end_time, days) VALUES ($1, $2, $3, $4, $5)", [newDoctor.id, clinicId, startTime, endTime, days]);
+            await db.query("INSERT INTO doctor_schedules (doctor_id, clinic_id, start_time, end_time, days, patient_limit) VALUES ($1, $2, $3, $4, $5, $6)", [newDoctor.id, clinicId, startTime, endTime, days, patientLimit]);
         }
         res.json({ success: true });
     } catch (err) {
