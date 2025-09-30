@@ -29,7 +29,6 @@ async function getNextQueueNumber(doctorId, date, clinicId) {
 
 // --- API ROUTES ---
 
-
 // --- Auth ---
 app.post("/api/login/:role", async (req, res) => {
     const { role } = req.params;
@@ -107,9 +106,9 @@ app.get("/api/dashboard/:role/:userId", async (req, res) => {
              const [patientsRes, doctorsRes, clinicsRes, appointmentsRes, receptionistsRes] = await Promise.all([
                 db.query("SELECT * FROM patients ORDER BY name"),
                 db.query("SELECT d.*, '' as password FROM doctors d ORDER BY name"),
-                db.query("SELECT * FROM clinics ORDER BY name"), // Fetch all clinics for the dropdown
+                db.query("SELECT * FROM clinics ORDER BY name"),
                 db.query("SELECT a.*, p.name as patient_name, d.name as doctor_name, c.name as clinic_name FROM appointments a JOIN patients p ON a.patient_id = p.id JOIN doctors d ON a.doctor_id = d.id JOIN clinics c ON a.clinic_id = c.id WHERE a.date = $1 ORDER BY a.time ASC", [today]),
-                db.query("SELECT * FROM receptionists") // Fetch all receptionists to get passwords
+                db.query("SELECT * FROM receptionists")
             ]);
 
             const clinicsWithReceptionists = clinicsRes.rows.map(clinic => {
@@ -196,6 +195,16 @@ app.get('/api/appointments/clinic/:clinicId', async (req, res) => {
 app.post("/api/appointments/book", async (req, res) => {
     const { patientId, doctorId, clinicId, date } = req.body;
     try {
+        // *** NEW: Check for existing appointment for the same patient, doctor, and date ***
+        const existingAppointment = await db.query(
+            "SELECT id FROM appointments WHERE patient_id = $1 AND doctor_id = $2 AND date = $3",
+            [patientId, doctorId, date]
+        );
+
+        if (existingAppointment.rows.length > 0) {
+            return res.status(400).json({ success: false, message: "You already have an appointment with this doctor on this day." });
+        }
+
         const [doctor, patient, schedule] = await Promise.all([
             db.query("SELECT * FROM doctors WHERE id = $1", [doctorId]).then(r => r.rows[0]),
             db.query("SELECT * FROM patients WHERE id = $1", [patientId]).then(r => r.rows[0]),
@@ -598,3 +607,4 @@ app.listen(port, () => {
     deleteOldAppointments();
     setInterval(deleteOldAppointments, 24 * 60 * 60 * 1000);
 });
+
