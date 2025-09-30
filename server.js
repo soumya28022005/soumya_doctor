@@ -27,6 +27,7 @@ async function getNextQueueNumber(doctorId, date, clinicId) {
     return parseInt(result.rows[0].count) + 1;
 }
 
+
 // --- API ROUTES ---
 
 // --- Auth ---
