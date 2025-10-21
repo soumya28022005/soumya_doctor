@@ -14,7 +14,7 @@ app.use(bodyParser.urlencoded({ extended: true }));
 
 // --- Database Connection ---
 const db = new Pool({
-    connectionString: "postgresql://postgres:Soumya2802@@db.rancgomqjngwawhbuymy.supabase.co:5432/postgres",
+    connectionString: "postgresql://postgres:natjaG-higzid-8qunxa@db.rancgomqjngwawhbuymy.supabase.co:5432/postgres",
     ssl: { rejectUnauthorized: false },
     family: 4,
 });
