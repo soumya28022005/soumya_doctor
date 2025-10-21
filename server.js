@@ -20,7 +20,6 @@ app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 
 // --- Database Connection ---
-// SOTHIK CONNECTION STRING
 const connectionString = "postgres://postgres:Soumya2802%40@db.rancgomqjngwawhbuymy.supabase.co:5432/postgres?sslmode=require";
 
 const db = new Pool({
@@ -1014,23 +1013,11 @@ async function deleteOldAppointments() {
         console.error("Error during scheduled deletion of old appointments:", err);
     }
 }
+app.get("/", (req, res) => {
+    res.send("<h1>AMAR SERVER V8 FINAL CHOLCHE! JODI ETA DEKHTE PAO, DEPLOY SUCCESSFUL!</h1>");
+});
 
 // --- Server ---
 app.listen(port, () => {
     console.log(`Backend server running on http://localhost:${port}`);
-    // Optional: Run cleanup once on startup
-    // deleteOldAppointments();
-    // Schedule to run every 24 hours
-    // setInterval(deleteOldAppointments, 24 * 60 * 60 * 1000); // 24 hours
-});
-
-// Catch-all for unhandled errors (optional but good practice)
-process.on('uncaughtException', (err) => {
-  console.error('There was an uncaught error', err);
-  // process.exit(1); // Optional: exit if you want the server to stop on critical errors
-});
-
-process.on('unhandledRejection', (reason, promise) => {
-  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
-  // Application specific logging, throwing an error, or other logic here
 });
