@@ -13,13 +13,13 @@ app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 
 // --- Database Connection ---
-// --- Database Connection ---
 const db = new Pool({
-    user: 'postgres',
+    user: 'postgres.rancgomqjngwawhbuymy',
     password: 'natjaG-higzid-8qunxa',
-    host: 'db.rancgomqjngwawhbuymy.supabase.co',
-    port: 5432,
+    host: 'aws-1-us-east-2.pooler.supabase.com',
+    port: 6543,
     database: 'postgres',
+    pool_mode:'transaction',
     ssl: { rejectUnauthorized: false },
     family: 4, 
 });
