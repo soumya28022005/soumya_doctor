@@ -27,11 +27,11 @@ app.use(bodyParser.urlencoded({ extended: true }));
 
 // --- Database Connection ---
 const db = new Pool({
-    
+    // Sothik (Correct) Connection String
     connectionString: "postgresql://postgres:Soumya2802%40@db.rancgomqjngwawhbuymy.supabase.co:5432/postgres",
     
     ssl: { rejectUnauthorized: false },
-    family: 4 // IPv4 Force korar jonno (eta thik chilo)
+    family: 4 // IPv4 Force korar jonno (eta thik ache)
 });
 
 // Test DB connection on startup (optional but recommende)
