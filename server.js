@@ -37,7 +37,7 @@ const db = new Pool({
     ssl: { 
         rejectUnauthorized: false 
     },
-    family: 4 // <-- Force connection over IPv4
+    family: 6 // <-- Force connection over IPv4
 });
 
 // Test DB connection on startup (optional but recommende)
