@@ -27,17 +27,13 @@ app.use(bodyParser.urlencoded({ extended: true }));
 
 // --- Database Connection ---
 // --- Database Connection ---
+const connectionString = "postgres://postgres:Soumya2802%40@db.rancgomqjngwawhbuymy.supabase.co:5432/postgres?sslmode=require";
+
 const db = new Pool({
-    user: 'postgres',
-    host: 'db.rancgomqjngwawhbuymy.supabase.co',
-    database: 'postgres',
-    password: 'Soumya2802@', // <-- Apnar sothik password (special characters ekhane thik kaj korbe)
-    port: 5432,
-    
-    ssl: { 
+    connectionString: connectionString,
+    ssl: {
         rejectUnauthorized: false 
-    },
-    family: 6 // <-- Force connection over IPv4
+    }
 });
 
 // Test DB connection on startup (optional but recommende)
