@@ -29,7 +29,8 @@ app.use(bodyParser.urlencoded({ extended: true }));
 const db = new Pool({
     // Replace with your actual Supabase connection string
     connectionString: "postgresql://postgres:Soumya2802@@db.rancgomqjngwawhbuymy.supabase.co:5432/postgres",
-    ssl: { rejectUnauthorized: false }
+    ssl: { rejectUnauthorized: false },
+    family: 4 // <-- Ei line-ti add korun (Force connection over IPv4)
 });
 
 // Test DB connection on startup (optional but recommended)
