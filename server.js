@@ -25,7 +25,7 @@ db.connect((err, client, release) => {
         return console.error('Error acquiring client', err.stack);
     }
     client.query('SELECT NOW()', (err, result) => {
-        release(); // Release the client back to the pool
+        release(); // Release the client back to the poolk
         if (err) {
             return console.error('Error executing query', err.stack);
         }
