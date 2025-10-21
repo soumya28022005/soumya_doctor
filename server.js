@@ -33,7 +33,7 @@ const db = new Pool({
     family: 4 // <-- Ei line-ti add korun (Force connection over IPv4)
 });
 
-// Test DB connection on startup (optional but recommended)
+// Test DB connection on startup (optional but recommende)
 db.connect((err, client, release) => {
     if (err) {
         return console.error('Error acquiring client', err.stack);
