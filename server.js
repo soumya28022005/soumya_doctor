@@ -3,52 +3,51 @@ import bodyParser from "body-parser";
 import pg from "pg";
 import cors from "cors";
 
-const { Pool } = pg; // Use Pool for better connection management
+const { Pool } = pg;
 const app = express();
-const port =  3000; // Use environment variable or default
+// JORURI CHANGE: Render-er dewa PORT use korun
+const port = process.env.PORT || 3000;
 
 // --- Middleware ---
-// --- Middleware ---
-
-// Explicit CORS Configuration
 const corsOptions = {
-  origin: "*", // Shob origin allow korun (development-er jonno)
-  methods: "GET,POST,PUT,DELETE,PATCH,OPTIONS", // POST ebong OPTIONS allow kora khub joruri
-  allowedHeaders: "Content-Type, Authorization" // Ei header-guli allow korun
+  origin: "*",
+  methods: "GET,POST,PUT,DELETE,PATCH,OPTIONS",
+  allowedHeaders: "Content-Type, Authorization"
 };
-
 app.use(cors(corsOptions));
-
-// Browser-er preflight (OPTIONS) request-gulike handle korar jonno
-app.options('*', cors(corsOptions)); 
-
+app.options('*', cors(corsOptions));
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 
 // --- Database Connection ---
-// --- Database Connection ---
+// SOTHIK CONNECTION STRING
 const connectionString = "postgres://postgres:Soumya2802%40@db.rancgomqjngwawhbuymy.supabase.co:5432/postgres?sslmode=require";
 
 const db = new Pool({
     connectionString: connectionString,
     ssl: {
-        rejectUnauthorized: false 
+        rejectUnauthorized: false
     }
 });
 
-// Test DB connection on startup (optional but recommende)
+// Test DB connection on startup
 db.connect((err, client, release) => {
     if (err) {
-        return console.error('Error acquiring client', err.stack); 
+        return console.error('Error acquiring client', err.stack);
     }
     client.query('SELECT NOW()', (err, result) => {
-        release();         release(); // Release the client back to the poolk
+        // JORURI CHANGE: 'release()' ekbar call korun
+        release(); // Release the client back to the pool
         if (err) {
             return console.error('Error executing query', err.stack);
         }
         console.log('Database connected successfully:', result.rows[0].now);
     });
 });
+
+// --- Helper Functions ---
+// (Baki code ja chilo thik thakbe)
+// ...
 
 
 // --- Helper Functions ---
