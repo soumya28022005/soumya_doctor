@@ -8,7 +8,20 @@ const app = express();
 const port = process.env.PORT || 3000; // Use environment variable or default
 
 // --- Middleware ---
-app.use(cors());
+// --- Middleware ---
+
+// Explicit CORS Configuration
+const corsOptions = {
+  origin: "*", // Shob origin allow korun (development-er jonno)
+  methods: "GET,POST,PUT,DELETE,PATCH,OPTIONS", // POST ebong OPTIONS allow kora khub joruri
+  allowedHeaders: "Content-Type, Authorization" // Ei header-guli allow korun
+};
+
+app.use(cors(corsOptions));
+
+// Browser-er preflight (OPTIONS) request-gulike handle korar jonno
+app.options('*', cors(corsOptions)); 
+
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 
