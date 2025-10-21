@@ -5,7 +5,7 @@ import cors from "cors";
 
 const { Pool } = pg; // Use Pool for better connection management
 const app = express();
-const port = process.env.PORT || 3000; // Use environment variable or default
+const port =  3000; // Use environment variable or default
 
 // --- Middleware ---
 // --- Middleware ---
