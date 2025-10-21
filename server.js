@@ -39,10 +39,10 @@ const db = new Pool({
 // Test DB connection on startup (optional but recommende)
 db.connect((err, client, release) => {
     if (err) {
-        return console.error('Error acquiring client', err.stack);
+        return console.error('Error acquiring client', err.stack); 
     }
     client.query('SELECT NOW()', (err, result) => {
-        release(); // Release the client back to the poolk
+        release();         release(); // Release the client back to the poolk
         if (err) {
             return console.error('Error executing query', err.stack);
         }
