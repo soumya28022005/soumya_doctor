@@ -1,53 +1,55 @@
-throw new Error("JODI EI ERROR DEKHTE PAN, TAHLE NOTUN CODE DEPLOY HOYECHE - V9 TEST");
 import express from "express";
 import bodyParser from "body-parser";
 import pg from "pg";
 import cors from "cors";
 
-const { Pool } = pg;
+const { Pool } = pg; // Use Pool for better connection management
 const app = express();
-// JORURI CHANGE: Render-er dewa PORT use korun
-const port = process.env.PORT || 3000;
+const port =  3000; // Use environment variable or default
 
 // --- Middleware ---
+// --- Middleware ---
+
+// Explicit CORS Configuration
 const corsOptions = {
-  origin: "*",
-  methods: "GET,POST,PUT,DELETE,PATCH,OPTIONS",
-  allowedHeaders: "Content-Type, Authorization"
+  origin: "*", // Shob origin allow korun (development-er jonno)
+  methods: "GET,POST,PUT,DELETE,PATCH,OPTIONS", // POST ebong OPTIONS allow kora khub joruri
+  allowedHeaders: "Content-Type, Authorization" // Ei header-guli allow korun
 };
+
 app.use(cors(corsOptions));
-app.options('*', cors(corsOptions));
+
+// Browser-er preflight (OPTIONS) request-gulike handle korar jonno
+app.options('*', cors(corsOptions)); 
+
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 
 // --- Database Connection ---
-const connectionString = "postgres://postgres:Soumya2802%40@db.rancgomqjngwawhbuymy.supabase.co:5432/postgres?sslmode=require";
+// --- Database Connection ---
+const connectionString = "postgresql://postgres:Soumya2802@@db.rancgomqjngwawhbuymy.supabase.co:5432/postgres";
 
 const db = new Pool({
     connectionString: connectionString,
     ssl: {
-        rejectUnauthorized: false
+        rejectUnauthorized: false 
     }
 });
 
-// Test DB connection on startup
+// Test DB connection on startup (optional but recommende)
 db.connect((err, client, release) => {
     if (err) {
-        return console.error('Error acquiring client', err.stack);
+        return console.error('Error acquiring client', err.stack); 
     }
     client.query('SELECT NOW()', (err, result) => {
-        // JORURI CHANGE: 'release()' ekbar call korun
         release(); // Release the client back to the pool
+
         if (err) {
             return console.error('Error executing query', err.stack);
         }
         console.log('Database connected successfully:', result.rows[0].now);
     });
 });
-
-// --- Helper Functions ---
-// (Baki code ja chilo thik thakbe)
-// ...
 
 
 // --- Helper Functions ---
@@ -1014,11 +1016,23 @@ async function deleteOldAppointments() {
         console.error("Error during scheduled deletion of old appointments:", err);
     }
 }
-app.get("/", (req, res) => {
-    res.send("<h1>AMAR SERVER V8 FINAL CHOLCHE! JODI ETA DEKHTE PAO, DEPLOY SUCCESSFUL!</h1>");
-});
 
 // --- Server ---
 app.listen(port, () => {
     console.log(`Backend server running on http://localhost:${port}`);
+    // Optional: Run cleanup once on startup
+    // deleteOldAppointments();
+    // Schedule to run every 24 hours
+    // setInterval(deleteOldAppointments, 24 * 60 * 60 * 1000); // 24 hours
+});
+
+// Catch-all for unhandled errors (optional but good practice)
+process.on('uncaughtException', (err) => {
+  console.error('There was an uncaught error', err);
+  // process.exit(1); // Optional: exit if you want the server to stop on critical errors
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+  // Application specific logging, throwing an error, or other logic here
 });
