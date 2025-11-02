@@ -10,12 +10,29 @@ const { Pool } = pg;
 const app = express();
 const port = 3000;
 
-env.config();
+
 
 // --- Middleware ---
 app.use(cors());
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
+env.config();
+const allowedOrigins = [
+    'https://soumya28022005.github.io', // Apnar GitHub Pages Frontend
+    'http://localhost:5501',             // Apnar Local Frontend
+    'http://127.0.0.1:5501'            // Apnar Local Frontend
+];
+
+app.use(cors({
+    origin: function (origin, callback) {
+        // Shob URL ke access dite, jara list-e ache
+        if (!origin || allowedOrigins.indexOf(origin) !== -1) {
+            callback(null, true);
+        } else {
+            callback(new Error('Not allowed by CORS'));
+        }
+    }
+}))
 
 // --- Database Connection ---
 const db = new Pool({
