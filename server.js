@@ -14,12 +14,12 @@ app.use(bodyParser.urlencoded({ extended: true }));
 
 // --- Database Connection ---
 const db = new Pool({
-    user: 'postgres.rancgomqjngwawhbuymy',
-    password: 'natjaG-higzid-8qunxa',
-    host: 'aws-1-us-east-2.pooler.supabase.com',
-    port: 6543,
-    database: 'postgres',
-    pool_mode:'transaction',
+    user: process.env.user,
+    password: process.env.password,
+    host: process.env.host,
+    port: process.env.port,
+    database: process.env.database,
+    pool_mode:process.env.pool_mode,
     ssl: { rejectUnauthorized: false },
     family: 4, 
 });
@@ -677,6 +677,13 @@ async function deleteOldAppointments() {
         console.error("Error during scheduled deletion of old appointments:", err);
     }
 }
+app.get("/api/health-check", (req, res) => {
+    try {
+        res.json({ success: true, message: "Server is awake and healthy." });
+    } catch (e) {
+        res.status(500).json({ success: false, message: "Server is down." });
+    }
+});
 
 // --- Server ---
 app.listen(port, () => {
