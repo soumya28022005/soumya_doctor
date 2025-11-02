@@ -4,6 +4,8 @@ import pg from "pg";
 import cors from "cors";
 import { OAuth2Client } from 'google-auth-library';
 import env from "dotenv";
+import jwt from 'jsonwebtoken';
+
 const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
 const { Pool } = pg;
@@ -86,6 +88,24 @@ async function checkScheduleConflict(doctorId, startTime, endTime, days, schedul
         client.release();
     }
 }
+function verifyToken(req, res, next) {
+    const authHeader = req.headers['authorization'];
+    const token = authHeader && authHeader.split(' ')[1]; // Format: "Bearer <token>"
+
+    if (token == null) {
+        return res.status(401).json({ success: false, message: 'Access denied. No token provided.' });
+    }
+
+    jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
+        if (err) {
+            return res.status(403).json({ success: false, message: 'Invalid or expired token.' });
+        }
+        
+        // Token valid hole, user-er data-gulo request object-e save korbe
+        req.user = user; 
+        next(); // Poroborti kaj (dashboard data fetch) korte pathiye debe
+    });
+}
 
 
 // --- API ROUTES ---
@@ -98,7 +118,17 @@ app.post("/api/login/:role", async (req, res) => {
     try {
         const result = await db.query(`SELECT * FROM ${tableName} WHERE username = $1 AND password = $2`, [username, password]);
         if (result.rows.length > 0) {
-            res.json({ success: true, user: result.rows[0] });
+           const user = result.rows[0];
+            
+            // Login successful hole ekta token toiri korun
+            const token = jwt.sign(
+                { userId: user.id, role: role }, 
+                process.env.JWT_SECRET, 
+                { expiresIn: '1h' } // Token-er meyad 1 ghonta
+            );
+            
+            // Frontend-e user data-r sathe token-ti-o pathan
+            res.json({ success: true, user: user, token: token });
         } else {
             res.json({ success: false, message: "Invalid username or password." });
         }
@@ -131,9 +161,15 @@ app.post("/api/signup/patient", async (req, res) => {
 });
 
 // --- Dashboard Data ---
-app.get("/api/dashboard/:role/:userId", async (req, res) => {
+app.get("/api/dashboard/:role/:userId", verifyToken, async (req, res) => { 
     const { role, userId } = req.params;
-    const { clinicId } = req.query;
+
+    // Extra check: Token-er user ki admin? Naki nijer dashboard access korchhe?
+    if (req.user.role !== 'admin' && (req.user.userId != userId || req.user.role !== role)) {
+        return res.status(403).json({ success: false, message: 'Access denied. You are not authorized.' });
+    }
+    
+    // Jokhon `verifyToken` pass korbe, tokhon-i shudhu ei code run hobe
     try {
         const userRes = await db.query(`SELECT * FROM ${role}s WHERE id = $1`, [userId]);
         if (userRes.rows.length === 0) return res.status(404).json({ success: false, message: `${role} not found` });
@@ -736,9 +772,14 @@ app.post("/api/auth/google", async (req, res) => {
             );
             user = newUserResult.rows[0];
         }
+        const jwtToken = jwt.sign(
+            { userId: user.id, role: 'patient' }, // Google login shudhu patient-der jonno
+            process.env.JWT_SECRET, 
+            { expiresIn: '1h' }
+        );
         
         // ফ্রন্টএন্ডকে ইউজার ডেটা এবং সাকসেস মেসেজ পাঠান (JSON ফরম্যাটে)
-        res.json({ success: true, user: user });
+        res.json({ success: true, user: user, token: jwtToken });
 
     } catch (err) {
         console.error("Google Auth Error:", err);
