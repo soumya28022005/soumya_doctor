@@ -2,10 +2,15 @@ import express from "express";
 import bodyParser from "body-parser";
 import pg from "pg";
 import cors from "cors";
+import { OAuth2Client } from 'google-auth-library';
+import env from "dotenv";
+const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
 const { Pool } = pg;
 const app = express();
 const port = 3000;
+
+env.config();
 
 // --- Middleware ---
 app.use(cors());
@@ -682,6 +687,45 @@ app.get("/api/health-check", (req, res) => {
         res.json({ success: true, message: "Server is awake and healthy." });
     } catch (e) {
         res.status(500).json({ success: false, message: "Server is down." });
+    }
+});
+app.post("/api/auth/google", async (req, res) => {
+    try {
+        const { token } = req.body; // ফ্রন্টএন্ড থেকে Google ID টোকেন আসবে
+
+        // টোকেন-টি ভেরিফাই করুন
+        const ticket = await client.verifyIdToken({
+            idToken: token,
+            audience: process.env.GOOGLE_CLIENT_ID, 
+        });
+
+        const payload = ticket.getPayload();
+        const googleEmail = payload.email;
+        const googleName = payload.name;
+        
+        // দেখুন এই ইমেল দিয়ে কোনও ইউজার (patient) আছে কিনা
+        let userResult = await db.query("SELECT * FROM patients WHERE username = $1", [googleEmail]);
+
+        let user;
+        if (userResult.rows.length > 0) {
+            // যদি ইউজার আগে থেকেই থাকে
+            user = userResult.rows[0];
+        } else {
+            // যদি নতুন ইউজার হয়, তাকে তৈরি করুন
+            // পাসওয়ার্ড ফিল্ডে 'google' লিখে রাখছি, কারণ তাদের পাসওয়ার্ড নেই
+            const newUserResult = await db.query(
+                "INSERT INTO patients (name, username, password, mobile, dob) VALUES ($1, $2, $3, $4, $5) RETURNING *",
+                [googleName, googleEmail, 'google', 'N/A', new Date()] // dob একটা ডিফল্ট দিন
+            );
+            user = newUserResult.rows[0];
+        }
+        
+        // ফ্রন্টএন্ডকে ইউজার ডেটা এবং সাকসেস মেসেজ পাঠান (JSON ফরম্যাটে)
+        res.json({ success: true, user: user });
+
+    } catch (err) {
+        console.error("Google Auth Error:", err);
+        res.status(401).json({ success: false, message: "Google authentication failed." });
     }
 });
 
