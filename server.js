@@ -6,7 +6,7 @@ import { OAuth2Client } from 'google-auth-library';
 import env from "dotenv";
 import jwt from 'jsonwebtoken';
 import nodemailer from 'nodemailer';
-
+import bcrypt from 'bcrypt'; // <-- Security-r jonno add kora holo
 
 const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
@@ -14,29 +14,29 @@ const { Pool } = pg;
 const app = express();
 const port = 3000;
 
-
-
 // --- Middleware ---
-app.use(cors());
+// app.use(cors()); // <-- Purono duplicate line-ti baad dewa hoyeche
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 env.config();
+
 const allowedOrigins = [
-    'https://soumya28022005.github.io', // Apnar GitHub Pages Frontend
-    'http://localhost:5501',             // Apnar Local Frontend
-    'http://127.0.0.1:5501'            // Apnar Local Frontend
+    'https://soumya28022005.github.io',
+    'http://localhost:5501',
+    'http://127.0.0.1:5501',
+    'http://127.0.0.1:5500', // Apnar notun port
+    "null"
 ];
 
 app.use(cors({
     origin: function (origin, callback) {
-        // Shob URL ke access dite, jara list-e ache
         if (!origin || allowedOrigins.indexOf(origin) !== -1) {
             callback(null, true);
         } else {
             callback(new Error('Not allowed by CORS'));
         }
     }
-}))
+}));
 
 // --- Database Connection ---
 const db = new Pool({
@@ -45,10 +45,24 @@ const db = new Pool({
     host: process.env.host,
     port: process.env.port,
     database: process.env.database,
-    pool_mode:process.env.pool_mode,
+    pool_mode: process.env.pool_mode,
     ssl: { rejectUnauthorized: false },
-    family: 4, 
+    family: 4,
 });
+
+// --- Email Transporter ---
+const transporter = nodemailer.createTransport({
+    host: process.env.EMAIL_HOST,
+    port: 587,
+    secure: false,
+    auth: {
+        user: process.env.EMAIL_USER,
+        pass: process.env.EMAIL_PASS,
+    },
+});
+
+// --- In-memory OTP Storage ---
+const otpStorage = {}; // Ekhon eta defined
 
 // --- Helper Functions ---
 async function getNextQueueNumber(doctorId, date, clinicId) {
@@ -69,102 +83,124 @@ async function checkScheduleConflict(doctorId, startTime, endTime, days, schedul
             params.push(scheduleIdToExclude);
         }
         const { rows: existingSchedules } = await client.query(query, params);
-
         const newDays = days.startsWith('DATE:') ? days.substring(5).split(',') : days.split(',');
-
         for (const schedule of existingSchedules) {
             const existingDays = schedule.days.startsWith('DATE:') ? schedule.days.substring(5).split(',') : schedule.days.split(',');
             const hasCommonDay = newDays.some(day => existingDays.includes(day));
-
             if (hasCommonDay) {
-                // Check for time overlap
                 const existingStart = schedule.start_time;
                 const existingEnd = schedule.end_time;
                 if (startTime < existingEnd && endTime > existingStart) {
-                    return true; // Conflict found
+                    return true;
                 }
             }
         }
-        return false; // No conflict
+        return false;
     } finally {
         client.release();
     }
 }
-const transporter = nodemailer.createTransport({
-    host: process.env.EMAIL_HOST,
-    port: 587,
-    secure: false, // true for 465, false for other ports
-    auth: {
-        user: process.env.EMAIL_USER,
-        pass: process.env.EMAIL_PASS,
-    },
-});
 
 function verifyToken(req, res, next) {
     const authHeader = req.headers['authorization'];
-    const token = authHeader && authHeader.split(' ')[1]; // Format: "Bearer <token>"
-
+    const token = authHeader && authHeader.split(' ')[1];
     if (token == null) {
         return res.status(401).json({ success: false, message: 'Access denied. No token provided.' });
     }
-
     jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
         if (err) {
             return res.status(403).json({ success: false, message: 'Invalid or expired token.' });
         }
-        
-        // Token valid hole, user-er data-gulo request object-e save korbe
-        req.user = user; 
-        next(); // Poroborti kaj (dashboard data fetch) korte pathiye debe
+        req.user = user;
+        next();
     });
 }
-
 
 // --- API ROUTES ---
 
 // --- Auth ---
-app.post("/api/login/:role", async (req, res) => {
-    const { role } = req.params;
-    const { username, password } = req.body;
-    const tableName = `${role}s`;
+
+/**
+ * NOTUN: Step 1 Signup - Request OTP
+ */
+app.post("/api/signup/request-otp", async (req, res) => {
+    const { username, mobile } = req.body;
     try {
-        const result = await db.query(`SELECT * FROM ${tableName} WHERE username = $1 AND password = $2`, [username, password]);
-        if (result.rows.length > 0) {
-           const user = result.rows[0];
-            
-            // Login successful hole ekta token toiri korun
-            const token = jwt.sign(
-                { userId: user.id, role: role }, 
-                process.env.JWT_SECRET, 
-                { expiresIn: '1h' } // Token-er meyad 1 ghonta
-            );
-            
-            // Frontend-e user data-r sathe token-ti-o pathan
-            res.json({ success: true, user: user, token: token });
-        } else {
-            res.json({ success: false, message: "Invalid username or password." });
+        // User exist kore kina check korun
+        const existingPatient = await db.query("SELECT id FROM patients WHERE username = $1 OR mobile = $2", [username, mobile]);
+        if (existingPatient.rows.length > 0) {
+            return res.status(400).json({ success: false, message: "This email or mobile number is already registered." });
         }
+
+        // OTP toiri korun o store korun
+        const otp = Math.floor(100000 + Math.random() * 900000).toString();
+        otpStorage[username] = {
+            otp: otp,
+            timestamp: Date.now(),
+            verified: false
+        };
+
+        // OTP email pathan
+        await transporter.sendMail({
+            from: `"Med-Connect" <${process.env.EMAIL_USER}>`,
+            to: username,
+            subject: "Verify Your Email for Med-Connect",
+            html: `
+                <p>Thank you for registering with Med-Connect.</p>
+                <p>Your One-Time Password (OTP) is:</p>
+                <h2 style="font-size: 24px; letter-spacing: 2px; color: #1d4ed8;">${otp}</h2>
+                <p>This OTP is valid for 10 minutes.</p>
+            `
+        });
+
+        res.json({ success: true, message: "An OTP has been sent to your email." });
+
     } catch (err) {
-        res.status(500).json({ success: false, message: "Error logging in." });
+        console.error("Signup OTP Error:", err);
+        res.status(500).json({ success: false, message: "Error sending OTP." });
     }
 });
 
+/**
+ * PORIBORTITO: Step 2 Signup - Create Patient (with OTP)
+ */
 app.post("/api/signup/patient", async (req, res) => {
-    const { name, dob, mobile, username, password } = req.body;
+    const { name, dob, mobile, username, password, otp } = req.body;
+
     try {
-        const existingPatientByMobile = await db.query("SELECT id FROM patients WHERE mobile = $1", [mobile]);
-        if (existingPatientByMobile.rows.length > 0) {
-            return res.status(400).json({ success: false, message: "This mobile number is already registered." });
+        // 1. OTP Validate korun
+        const storedData = otpStorage[username];
+        if (!storedData) {
+            return res.status(400).json({ success: false, message: "Please request an OTP first." });
         }
-        const existingPatientByUsername = await db.query("SELECT id FROM patients WHERE username = $1", [username]);
-        if (existingPatientByUsername.rows.length > 0) {
-            return res.status(400).json({ success: false, message: "This username is already taken." });
+        const isExpired = (Date.now() - storedData.timestamp) > 10 * 60 * 1000; // 10 minutes
+        if (isExpired) {
+            delete otpStorage[username];
+            return res.status(400).json({ success: false, message: "OTP has expired. Please request a new one." });
+        }
+        if (storedData.otp !== otp) {
+            return res.status(400).json({ success: false, message: "Invalid OTP." });
         }
 
+        // 2. Abar check korun user ache kina
+        const existingPatient = await db.query("SELECT id FROM patients WHERE username = $1 OR mobile = $2", [username, mobile]);
+        if (existingPatient.rows.length > 0) {
+            return res.status(400).json({ success: false, message: "This email or mobile number is already registered." });
+        }
+
+        // 3. Password Hash Korun
+        const saltRounds = 10;
+        const hashedPassword = await bcrypt.hash(password, saltRounds);
+
+        // 4. User toiri korun
         const result = await db.query(
             "INSERT INTO patients (name, dob, mobile, username, password) VALUES ($1, $2, $3, $4, $5) RETURNING *",
-            [name, dob, mobile, username, password]
+            [name, dob, mobile, username, hashedPassword] // Hashed password save korun
         );
+
+        // 5. OTP delete korun
+        delete otpStorage[username];
+
         res.json({ success: true, user: result.rows[0] });
     } catch (err) {
         console.error("Signup Error:", err);
@@ -172,16 +208,144 @@ app.post("/api/signup/patient", async (req, res) => {
     }
 });
 
+
+/**
+ * PORIBORTITO: Login (with bcrypt ebong Thank You Email)
+ */
+app.post("/api/login/:role", async (req, res) => {
+    const { role } = req.params;
+    const { username, password } = req.body;
+    const tableName = `${role}s`;
+    try {
+        // Step 1: Username diye user khujun
+        const result = await db.query(`SELECT * FROM ${tableName} WHERE username = $1`, [username]);
+
+        if (result.rows.length > 0) {
+            const user = result.rows[0];
+
+            // Step 2: Hashed password compare korun
+            const match = await bcrypt.compare(password, user.password);
+
+            if (match) {
+                // Password mile geche
+                const token = jwt.sign(
+                    { userId: user.id, role: role },
+                    process.env.JWT_SECRET,
+                    { expiresIn: '1h' }
+                );
+
+                // "Thank you for logging in" email pathan (background-e cholbe)
+                transporter.sendMail({
+                    from: `"Med-Connect" <${process.env.EMAIL_USER}>`,
+                    to: user.username,
+                    subject: "New Login to Med-Connect",
+                    html: `
+                        <p>Hi ${user.name || 'User'},</p>
+                        <p>We noticed a new login to your Med-Connect account.</p>
+                        <p>If this was you, you can safely ignore this email.</p>
+                        <p>If this was not you, please reset your password immediately.</p>
+                    `
+                }).catch(err => console.error("Login email error:", err)); // Error log korun
+
+                delete user.password; // Password pathaben na
+                res.json({ success: true, user: user, token: token });
+
+            } else {
+                // Password bHUL
+                res.json({ success: false, message: "Invalid username or password." });
+            }
+        } else {
+            // User paoa jai ni
+            res.json({ success: false, message: "Invalid username or password." });
+        }
+    } catch (err) {
+        console.error("Login Error:", err);
+        res.status(500).json({ success: false, message: "Error logging in." });
+    }
+});
+
+/**
+ * PORIBORTITO: Forgot Password (English text)
+ */
+app.post("/api/forgot-password", async (req, res) => {
+    const { username, role } = req.body;
+    const tableName = `${role}s`;
+    try {
+        const userRes = await db.query(`SELECT * FROM ${tableName} WHERE username = $1`, [username]);
+        if (userRes.rows.length === 0) {
+            return res.status(404).json({ success: false, message: "No user found with this email/username." });
+        }
+
+        const otp = Math.floor(100000 + Math.random() * 900000).toString();
+        otpStorage[username] = {
+            otp: otp,
+            timestamp: Date.now(),
+            role: role
+        };
+
+        await transporter.sendMail({
+            from: `"Med-Connect" <${process.env.EMAIL_USER}>`,
+            to: username,
+            subject: "Your Password Reset OTP",
+            html: `
+                <p>Your OTP for Med-Connect password reset is:</p>
+                <h2 style="font-size: 24px; letter-spacing: 2px; color: #1d4ed8;">${otp}</h2>
+                <p>This OTP is valid for 10 minutes.</p>
+                <p>If you did not request this, please ignore this email.</p>
+            `
+        });
+
+        res.json({ success: true, message: "An OTP has been sent to your email." });
+
+    } catch (err) {
+        console.error("Forgot Password Error:", err);
+        res.status(500).json({ success: false, message: "Error sending OTP." });
+    }
+});
+
+/**
+ * PORIBORTITO: Reset Password (with bcrypt ebong English)
+ */
+app.post("/api/reset-password", async (req, res) => {
+    const { username, otp, newPassword } = req.body;
+    try {
+        const storedData = otpStorage[username];
+        if (!storedData) {
+            return res.status(400).json({ success: false, message: "OTP not requested or has expired." });
+        }
+        const isExpired = (Date.now() - storedData.timestamp) > 10 * 60 * 1000;
+        if (isExpired) {
+            delete otpStorage[username];
+            return res.status(400).json({ success: false, message: "OTP has expired. Please try again." });
+        }
+        if (storedData.otp !== otp) {
+            return res.status(400).json({ success: false, message: "Invalid OTP." });
+        }
+
+        // Notun password hash korun
+        const saltRounds = 10;
+        const hashedPassword = await bcrypt.hash(newPassword, saltRounds);
+
+        // Hashed password database-e update korun
+        const tableName = `${storedData.role}s`;
+        await db.query(`UPDATE ${tableName} SET password = $1 WHERE username = $2`, [hashedPassword, username]);
+
+        delete otpStorage[username];
+        res.json({ success: true, message: "Password has been reset successfully. You can now login." });
+
+    } catch (err) {
+        console.error("Reset Password Error:", err);
+        res.status(500).json({ success: false, message: "Error resetting password." });
+    }
+});
+
+
 // --- Dashboard Data ---
 app.get("/api/dashboard/:role/:userId", verifyToken, async (req, res) => { 
     const { role, userId } = req.params;
-
-    // Extra check: Token-er user ki admin? Naki nijer dashboard access korchhe?
     if (req.user.role !== 'admin' && (req.user.userId != userId || req.user.role !== role)) {
         return res.status(403).json({ success: false, message: 'Access denied. You are not authorized.' });
     }
-    
-    // Jokhon `verifyToken` pass korbe, tokhon-i shudhu ei code run hobe
     try {
         const userRes = await db.query(`SELECT * FROM ${role}s WHERE id = $1`, [userId]);
         if (userRes.rows.length === 0) return res.status(404).json({ success: false, message: `${role} not found` });
@@ -193,14 +357,13 @@ app.get("/api/dashboard/:role/:userId", verifyToken, async (req, res) => {
             data.appointments = appointmentsRes.rows;
         } else if (role === 'doctor') {
             const today = new Date().toISOString().slice(0, 10);
-            
+            const clinicId = req.query.clinicId; 
             let appointmentsQuery = "SELECT a.*, p.name as patient_name, p.dob FROM appointments a JOIN patients p ON a.patient_id = p.id WHERE a.doctor_id = $1 AND a.date = $2 ORDER BY a.queue_number ASC";
             let appointmentsParams = [userId, today];
             if (clinicId) {
                 appointmentsQuery = "SELECT a.*, p.name as patient_name, p.dob FROM appointments a JOIN patients p ON a.patient_id = p.id WHERE a.doctor_id = $1 AND a.date = $2 AND a.clinic_id = $3 ORDER BY a.queue_number ASC";
-                appointmentsParams.push(clinicId);
+                appointmentsParams = [userId, today, clinicId]; 
             }
-            
             const [appointmentsRes, schedulesRes, clinicsRes, requestsRes, invitationsRes] = await Promise.all([
                 db.query(appointmentsQuery, appointmentsParams),
                 db.query(`SELECT ds.*, c.name as clinic_name FROM doctor_schedules ds JOIN clinics c ON ds.clinic_id = c.id WHERE ds.doctor_id = $1 ORDER BY ds.start_time`, [userId]),
@@ -229,17 +392,10 @@ app.get("/api/dashboard/:role/:userId", verifyToken, async (req, res) => {
                 db.query("SELECT a.*, p.name as patient_name, d.name as doctor_name, c.name as clinic_name FROM appointments a JOIN patients p ON a.patient_id = p.id JOIN doctors d ON a.doctor_id = d.id JOIN clinics c ON a.clinic_id = c.id WHERE a.date = $1 ORDER BY a.time ASC", [today]),
                 db.query("SELECT * FROM receptionists")
             ]);
-
             const clinicsWithReceptionists = clinicsRes.rows.map(clinic => {
                 const receptionist = receptionistsRes.rows.find(r => r.clinic_id === clinic.id);
-                return {
-                    ...clinic,
-                    receptionist_name: receptionist ? receptionist.name : null,
-                    receptionist_username: receptionist ? receptionist.username : null,
-                    receptionist_password: receptionist ? receptionist.password : null,
-                };
+                return { ...clinic, receptionist_name: receptionist ? receptionist.name : null, receptionist_username: receptionist ? receptionist.username : null, receptionist_password: receptionist ? '******' : null, };
             });
-            
             data = { ...data, patients: patientsRes.rows, doctors: doctorsRes.rows, clinics: clinicsWithReceptionists, appointments: appointmentsRes.rows };
         }
         res.json(data);
@@ -256,29 +412,23 @@ app.get("/api/doctors", async (req, res) => {
         let query = `SELECT DISTINCT d.id, d.name, d.specialty, d.phone FROM doctors d`;
         let params = [];
         let conditions = [];
-
         if (name) { conditions.push(`d.name ILIKE $${params.length + 1}`); params.push(`%${name}%`); }
         if (specialty) { conditions.push(`d.specialty ILIKE $${params.length + 1}`); params.push(`%${specialty}%`); }
-        
         if (clinic) {
             query += ' JOIN doctor_schedules ds ON d.id = ds.doctor_id JOIN clinics c ON ds.clinic_id = c.id';
             conditions.push(`c.name ILIKE $${params.length + 1}`);
             params.push(`%${clinic}%`);
         }
-
         if (conditions.length > 0) {
             query += ' WHERE ' + conditions.join(' AND ');
         }
         query += " ORDER BY d.name";
-        
         const doctorsResult = await db.query(query, params);
-        
         for (let doctor of doctorsResult.rows) {
             if (date) {
                 const searchDate = new Date(date);
                 const dayOfWeek = searchDate.toLocaleString('en-us', { weekday: 'long' });
                 const dateOfMonth = searchDate.getDate().toString();
-
                 const scheduleRes = await db.query(
                     `SELECT ds.*, c.name as clinic_name FROM doctor_schedules ds JOIN clinics c ON ds.clinic_id = c.id
                      WHERE ds.doctor_id = $1 AND (
@@ -287,13 +437,12 @@ app.get("/api/doctors", async (req, res) => {
                      )`,
                     [doctor.id, dayOfWeek, dateOfMonth]
                 );
-                
                 for(let schedule of scheduleRes.rows) {
                     if (schedule.patient_limit > 0) {
                         const appointmentCountRes = await db.query("SELECT COUNT(*) FROM appointments WHERE doctor_id = $1 AND clinic_id = $2 AND date = $3", [doctor.id, schedule.clinic_id, date]);
                         schedule.appointment_count = parseInt(appointmentCountRes.rows[0].count);
                     } else {
-                        schedule.appointment_count = 0; // Default if no limit
+                        schedule.appointment_count = 0;
                     }
                 }
                 doctor.schedules = scheduleRes.rows;
@@ -307,7 +456,6 @@ app.get("/api/doctors", async (req, res) => {
         res.status(500).json({ success: false, message: "Error searching doctors." });
     }
 });
-
 app.get("/api/clinics/search", async (req, res) => {
     const { name } = req.query;
     try {
@@ -339,6 +487,9 @@ app.get('/api/appointments/clinic/:clinicId', async (req, res) => {
     }
 });
 
+/**
+ * PORIBORTITO: Appointment Booking (with Email Confirmation)
+ */
 app.post("/api/appointments/book", async (req, res) => {
     const { patientId, doctorId, clinicId, date } = req.body;
     try {
@@ -346,14 +497,17 @@ app.post("/api/appointments/book", async (req, res) => {
         if (existingAppointment.rows.length > 0) {
             return res.status(400).json({ success: false, message: "You already have an appointment with this doctor on this day." });
         }
-
-        const [doctor, patient, schedule] = await Promise.all([
+        
+        // --- MODIFICATION 1: Add clinic query ---
+        const [doctor, patient, schedule, clinic] = await Promise.all([
             db.query("SELECT * FROM doctors WHERE id = $1", [doctorId]).then(r => r.rows[0]),
             db.query("SELECT * FROM patients WHERE id = $1", [patientId]).then(r => r.rows[0]),
-            db.query("SELECT * FROM doctor_schedules WHERE doctor_id = $1 AND clinic_id = $2", [doctorId, clinicId]).then(r => r.rows[0])
+            db.query("SELECT * FROM doctor_schedules WHERE doctor_id = $1 AND clinic_id = $2", [doctorId, clinicId]).then(r => r.rows[0]),
+            db.query("SELECT name FROM clinics WHERE id = $1", [clinicId]).then(r => r.rows[0]) // <-- Added this
         ]);
 
         if (!schedule) return res.status(400).json({ success: false, message: "Doctor does not have a valid schedule at this clinic for booking." });
+        if (!clinic) return res.status(400).json({ success: false, message: "Clinic not found." }); // <-- Added check
 
         if (schedule.patient_limit > 0) {
             const appointmentCountRes = await db.query("SELECT COUNT(*) FROM appointments WHERE doctor_id = $1 AND clinic_id = $2 AND date = $3", [doctorId, clinicId, date]);
@@ -365,9 +519,31 @@ app.post("/api/appointments/book", async (req, res) => {
         
         const queueNumber = await getNextQueueNumber(doctorId, date, clinicId);
         const start = new Date(`${date}T${schedule.start_time}`);
-        start.setMinutes(start.getMinutes() + (queueNumber - 1) * 15); // Assuming 15 mins per patient
+        start.setMinutes(start.getMinutes() + (queueNumber - 1) * 15);
         const approxTime = start.toTimeString().slice(0, 5);
+        
         await db.query(`INSERT INTO appointments (patient_id, doctor_id, clinic_id, date, "time", status, queue_number) VALUES ($1, $2, $3, $4, $5, 'Confirmed', $6) RETURNING *`, [patient.id, doctor.id, clinicId, date, approxTime, queueNumber]);
+
+        // --- MODIFICATION 2: Send confirmation email ---
+        transporter.sendMail({
+            from: `"Med-Connect" <${process.env.EMAIL_USER}>`,
+            to: patient.username, // Patient's email
+            subject: "Your Appointment is Confirmed!",
+            html: `
+                <p>Hi ${patient.name},</p>
+                <p>Your appointment has been successfully booked.</p>
+                <hr>
+                <p><strong>Doctor:</strong> Dr. ${doctor.name}</p>
+                <p><strong>Clinic:</strong> ${clinic.name}</p>
+                <p><strong>Date:</strong> ${new Date(date).toLocaleDateString()}</p>
+                <p><strong>Approx. Time:</strong> ${approxTime}</p>
+                <p><strong>Your Queue Number:</strong> #${queueNumber}</p>
+                <hr>
+                <p>You can check the live queue status in your dashboard on the day of your appointment.</p>
+                <p>Thank you for using Med-Connect.</p>
+            `
+        }).catch(err => console.error("Booking confirmation email error:", err)); // Log error but don't block response
+
         res.json({ success: true });
     } catch (err) {
         console.error("Booking error:", err);
@@ -375,13 +551,13 @@ app.post("/api/appointments/book", async (req, res) => {
     }
 });
 
+
 // --- Receptionist Actions ---
 app.post("/api/receptionist/handle-join-request", async (req, res) => {
     const { requestId, action } = req.body;
     try {
         const request = await db.query("SELECT * FROM clinic_join_requests WHERE id = $1", [requestId]).then(r => r.rows[0]);
         if (!request) return res.status(404).json({ success: false, message: 'Request not found.' });
-
         if (action === 'accept') {
             const conflict = await checkScheduleConflict(request.doctor_id, request.start_time, request.end_time, request.days);
             if (conflict) {
@@ -399,6 +575,9 @@ app.post("/api/receptionist/handle-join-request", async (req, res) => {
     }
 });
 
+/**
+ * PORIBORTITO: Receptionist Add Doctor (with bcrypt)
+ */
 app.post("/api/receptionist/add-doctor", async (req, res) => {
     const { name, specialty, username, password, Phonenumber, startTime, endTime, days, patientLimit, clinicId } = req.body;
     const client = await db.connect();
@@ -407,15 +586,14 @@ app.post("/api/receptionist/add-doctor", async (req, res) => {
         if (existingDoctor.rows.length > 0) {
             return res.status(400).json({ success: false, message: 'Username already exists. Please choose a different one.' });
         }
-
-        const conflict = await checkScheduleConflict(null, startTime, endTime, days); // No doctor ID yet
-        if (conflict) { // This check is conceptual for new doctors, real check is on existing ones
-             // For a new doctor, there are no existing schedules to conflict with, so this is mainly for logic consistency.
-        }
+        
+        const saltRounds = 10;
+        const hashedPassword = await bcrypt.hash(password, saltRounds);
 
         await client.query('BEGIN');
-        const newDoctorRes = await client.query("INSERT INTO doctors (name, specialty, username, password, phone) VALUES ($1, $2, $3, $4, $5) RETURNING *", [name, specialty, username, password, Phonenumber]);
+        const newDoctorRes = await client.query("INSERT INTO doctors (name, specialty, username, password, phone) VALUES ($1, $2, $3, $4, $5) RETURNING *", [name, specialty, username, hashedPassword, Phonenumber]);
         const newDoctor = newDoctorRes.rows[0];
+        
         await client.query("INSERT INTO doctor_schedules (doctor_id, clinic_id, start_time, end_time, days, patient_limit) VALUES ($1, $2, $3, $4, $5, $6)", [newDoctor.id, clinicId, startTime, endTime, days, patientLimit]);
         await client.query('COMMIT');
         res.json({ success: true, message: 'Doctor added successfully.' });
@@ -607,16 +785,25 @@ app.post("/api/appointments/:appointmentId/status", async (req, res) => {
 });
 
 
+/**
+ * PORIBORTITO: Receptionist Add Patient & Book (with bcrypt)
+ */
 app.post("/api/receptionist/add-patient-and-book", async (req, res) => {
     const { patientName, patientAge, doctorId, clinicId } = req.body;
     const today = new Date().toISOString().slice(0, 10);
     try {
-        const newPatient = await db.query("INSERT INTO patients (name, dob, username, password) VALUES ($1, $2, $3, $4) RETURNING *", [patientName, new Date(new Date().setFullYear(new Date().getFullYear() - patientAge)), `${patientName.replace(/\s/g, '').toLowerCase()}${patientAge}${Date.now()}`, 'password123']).then(r => r.rows[0]);
+        // Default password hash korun
+        const saltRounds = 10;
+        const hashedPassword = await bcrypt.hash('password123', saltRounds);
+        
+        const newPatient = await db.query("INSERT INTO patients (name, dob, username, password) VALUES ($1, $2, $3, $4) RETURNING *", [patientName, new Date(new Date().setFullYear(new Date().getFullYear() - patientAge)), `${patientName.replace(/\s/g, '').toLowerCase()}${patientAge}${Date.now()}`, hashedPassword]).then(r => r.rows[0]);
+        
         const [doctor, schedule] = await Promise.all([
             db.query("SELECT * FROM doctors WHERE id = $1", [doctorId]).then(r => r.rows[0]),
             db.query("SELECT * FROM doctor_schedules WHERE doctor_id = $1 AND clinic_id = $2", [doctorId, clinicId]).then(r => r.rows[0])
         ]);
         if (!schedule) return res.status(400).json({ success: false, message: "Doctor does not have a schedule at this clinic." });
+        
         const queueNumber = await getNextQueueNumber(doctorId, today, clinicId);
         const start = new Date(`${today}T${schedule.start_time}`);
         start.setMinutes(start.getMinutes() + (queueNumber - 1) * 15);
@@ -630,23 +817,38 @@ app.post("/api/receptionist/add-patient-and-book", async (req, res) => {
 });
 
 // --- Admin Actions ---
+
+/**
+ * PORIBORTITO: Admin Add Clinic (with bcrypt for Receptionist)
+ */
 app.post('/api/admin/clinics', async (req, res) => {
     const { name, address, receptionist_name, receptionist_username, receptionist_password } = req.body;
     try {
         const newClinic = await db.query("INSERT INTO clinics (name, address) VALUES ($1, $2) RETURNING *", [name, address]).then(r => r.rows[0]);
         if (receptionist_name && receptionist_username && receptionist_password) {
-            await db.query("INSERT INTO receptionists (name, username, password, clinic_id) VALUES ($1, $2, $3, $4)", [receptionist_name, receptionist_username, receptionist_password, newClinic.id]);
+            
+            const saltRounds = 10;
+            const hashedPassword = await bcrypt.hash(receptionist_password, saltRounds);
+            
+            await db.query("INSERT INTO receptionists (name, username, password, clinic_id) VALUES ($1, $2, $3, $4)", [receptionist_name, receptionist_username, hashedPassword, newClinic.id]);
         }
         res.json({ success: true });
     } catch (err) {
+        console.error("Admin add clinic error:", err);
         res.status(500).json({ success: false, message: 'Error adding clinic.' });
     }
 });
 
+/**
+ * PORIBORTITO: Admin Add Doctor (with bcrypt)
+ */
 app.post('/api/admin/doctors', async (req, res) => {
     const { name, specialty, username, password, phone, clinicId, startTime, endTime, days, patientLimit } = req.body;
     try {
-        const newDoctor = await db.query("INSERT INTO doctors (name, specialty, username, password, phone) VALUES ($1, $2, $3, $4, $5) RETURNING *", [name, specialty, username, password, phone]).then(r => r.rows[0]);
+        const saltRounds = 10;
+        const hashedPassword = await bcrypt.hash(password, saltRounds);
+        
+        const newDoctor = await db.query("INSERT INTO doctors (name, specialty, username, password, phone) VALUES ($1, $2, $3, $4, $5) RETURNING *", [name, specialty, username, hashedPassword, phone]).then(r => r.rows[0]);
         if (clinicId && startTime && endTime && days) {
             await db.query("INSERT INTO doctor_schedules (doctor_id, clinic_id, start_time, end_time, days, patient_limit) VALUES ($1, $2, $3, $4, $5, $6)", [newDoctor.id, clinicId, startTime, endTime, days, patientLimit]);
         }
@@ -657,16 +859,24 @@ app.post('/api/admin/doctors', async (req, res) => {
     }
 });
 
+/**
+ * PORIBORTITO: Admin Add Patient (with bcrypt)
+ */
 app.post('/api/admin/patients', async (req, res) => {
     const { name, dob, username, password, mobile } = req.body;
     try {
-        await db.query("INSERT INTO patients (name, dob, username, password, mobile) VALUES ($1, $2, $3, $4, $5)", [name, dob, username, password, mobile]);
+        const saltRounds = 10;
+        const hashedPassword = await bcrypt.hash(password, saltRounds);
+        
+        await db.query("INSERT INTO patients (name, dob, username, password, mobile) VALUES ($1, $2, $3, $4, $5)", [name, dob, username, hashedPassword, mobile]);
         res.json({ success: true });
     } catch (err) {
+        console.error("Admin add patient error:", err);
         res.status(500).json({ success: false, message: 'Error adding patient.' });
     }
 });
 
+// --- Delete Routes ---
 app.delete('/api/admin/clinics/:id', async (req, res) => {
     const { id } = req.params;
     const client = await db.connect();
@@ -734,7 +944,6 @@ async function deleteOldAppointments() {
     const yesterday = new Date(today);
     yesterday.setDate(today.getDate() - 1);
     const formattedDate = yesterday.toISOString().slice(0, 10);
-
     console.log(`Running scheduled task: Deleting appointments before ${formattedDate}...`);
     try {
         const result = await db.query("DELETE FROM appointments WHERE date < $1", [formattedDate]);
@@ -754,127 +963,64 @@ app.get("/api/health-check", (req, res) => {
         res.status(500).json({ success: false, message: "Server is down." });
     }
 });
+
+/**
+ * PORIBORTITO: Google Auth (with bcrypt)
+ */
 app.post("/api/auth/google", async (req, res) => {
     try {
-        const { token } = req.body; // ফ্রন্টএন্ড থেকে Google ID টোকেন আসবে
-
-        // টোকেন-টি ভেরিফাই করুন
+        const { token } = req.body;
         const ticket = await client.verifyIdToken({
             idToken: token,
-            audience: process.env.GOOGLE_CLIENT_ID, 
+            audience: process.env.GOOGLE_CLIENT_ID,
         });
 
         const payload = ticket.getPayload();
         const googleEmail = payload.email;
         const googleName = payload.name;
-        
-        // দেখুন এই ইমেল দিয়ে কোনও ইউজার (patient) আছে কিনা
-        let userResult = await db.query("SELECT * FROM patients WHERE username = $1", [googleEmail]);
 
+        let userResult = await db.query("SELECT * FROM patients WHERE username = $1", [googleEmail]);
         let user;
+
         if (userResult.rows.length > 0) {
-            // যদি ইউজার আগে থেকেই থাকে
             user = userResult.rows[0];
+            // Google login-er jonno password check korar dorkar nei
         } else {
-            // যদি নতুন ইউজার হয়, তাকে তৈরি করুন
-            // পাসওয়ার্ড ফিল্ডে 'google' লিখে রাখছি, কারণ তাদের পাসওয়ার্ড নেই
+            // Notun user hole, ekta random hash password toiri kore store korun
+            const saltRounds = 10;
+            const hashedPassword = await bcrypt.hash(`google_${Date.now()}`, saltRounds); 
+            
             const newUserResult = await db.query(
                 "INSERT INTO patients (name, username, password, mobile, dob) VALUES ($1, $2, $3, $4, $5) RETURNING *",
-                [googleName, googleEmail, 'google', 'N/A', new Date()] // dob একটা ডিফল্ট দিন
+                [googleName, googleEmail, hashedPassword, 'N/A', new Date()]
             );
             user = newUserResult.rows[0];
         }
+
         const jwtToken = jwt.sign(
-            { userId: user.id, role: 'patient' }, // Google login shudhu patient-der jonno
-            process.env.JWT_SECRET, 
+            { userId: user.id, role: 'patient' },
+            process.env.JWT_SECRET,
             { expiresIn: '1h' }
         );
         
-        // ফ্রন্টএন্ডকে ইউজার ডেটা এবং সাকসেস মেসেজ পাঠান (JSON ফরম্যাটে)
+        // Google Login email pathan
+        transporter.sendMail({
+            from: `"Med-Connect" <${process.env.EMAIL_USER}>`,
+            to: user.username,
+            subject: "New Login to Med-Connect (via Google)",
+            html: `
+                <p>Hi ${user.name},</p>
+                <p>We noticed a new login to your Med-Connect account using your Google account.</p>
+                <p>If this was you, you can safely ignore this email.</p>
+            `
+        }).catch(err => console.error("Google Login email error:", err));
+
+        delete user.password;
         res.json({ success: true, user: user, token: jwtToken });
 
     } catch (err) {
         console.error("Google Auth Error:", err);
         res.status(401).json({ success: false, message: "Google authentication failed." });
-    }
-});
-
-app.post("/api/forgot-password", async (req, res) => {
-    const { username, role } = req.body;
-    const tableName = `${role}s`;
-    
-    try {
-        // 1. User-ke khujun
-        const userRes = await db.query(`SELECT * FROM ${tableName} WHERE username = $1`, [username]);
-        if (userRes.rows.length === 0) {
-            return res.status(404).json({ success: false, message: "Ei email/username diye kono user paoa jai ni." });
-        }
-
-        // 2. 6-digit OTP toiri korun
-        const otp = Math.floor(100000 + Math.random() * 900000).toString();
-
-        // 3. OTP store korun (10 minuter jonno)
-        otpStorage[username] = {
-            otp: otp,
-            timestamp: Date.now(),
-            role: role
-        };
-
-        // 4. Email Pathan
-        await transporter.sendMail({
-            from: `"Med-Connect" <${process.env.EMAIL_USER}>`,
-            to: username, // username-i email hisebe dhora hocche
-            subject: "Your Password Reset OTP",
-            html: `
-                <p>Apnar Med-Connect password reset-er jonno OTP holo:</p>
-                <h2 style="font-size: 24px; letter-spacing: 2px; color: #1d4ed8;">${otp}</h2>
-                <p>Ei OTP-ti 10 minute porjonto valid thakbe.</p>
-                <p>Jodi apni ei request na kore thaken, tahole ei email-ti ignore korun.</p>
-            `
-        });
-
-        res.json({ success: true, message: "Ekti OTP apnar email-e pathano hoyeche." });
-
-    } catch (err) {
-        console.error("Forgot Password Error:", err);
-        res.status(500).json({ success: false, message: "OTP pathate giye error hoyeche." });
-    }
-});
-
-app.post("/api/reset-password", async (req, res) => {
-    const { username, otp, newPassword } = req.body;
-
-    try {
-        // 1. Stored OTP data ber korun
-        const storedData = otpStorage[username];
-
-        // 2. Validate OTP
-        if (!storedData) {
-            return res.status(400).json({ success: false, message: "OTP request kora hoi ni ba meyad shesh." });
-        }
-
-        const isExpired = (Date.now() - storedData.timestamp) > 10 * 60 * 1000; // 10 minutes
-        if (isExpired) {
-            delete otpStorage[username];
-            return res.status(400).json({ success: false, message: "OTP-er meyad shesh. Abar cheshta korun." });
-        }
-
-        if (storedData.otp !== otp) {
-            return res.status(400).json({ success: false, message: "Sothik OTP den." });
-        }
-
-        // 3. Password Update korun (Plain text, jemon apnar system-e ache)
-        const tableName = `${storedData.role}s`;
-        await db.query(`UPDATE ${tableName} SET password = $1 WHERE username = $2`, [newPassword, username]);
-
-        // 4. Used OTP delete korun
-        delete otpStorage[username];
-
-        res.json({ success: true, message: "Password success-fully reset kora hoyeche. Ekhon login korun." });
-
-    } catch (err) {
-        console.error("Reset Password Error:", err);
-        res.status(500).json({ success: false, message: "Password reset korte giye error hoyeche." });
     }
 });
 
@@ -884,4 +1030,3 @@ app.listen(port, () => {
     deleteOldAppointments();
     setInterval(deleteOldAppointments, 24 * 60 * 60 * 1000);
 });
-
