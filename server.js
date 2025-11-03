@@ -5,27 +5,30 @@ import cors from "cors";
 import { OAuth2Client } from 'google-auth-library';
 import env from "dotenv";
 import jwt from 'jsonwebtoken';
-import nodemailer from 'nodemailer';
-import bcrypt from 'bcrypt'; // <-- Security-r jonno add kora holo
+import bcrypt from 'bcrypt';
+import { Resend } from 'resend';
 
-const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
+// --- 1. Prothome .env file load korun ---
+env.config();
 
-const { Pool } = pg;
+// --- 2. Ebar shob initialize korun ---
 const app = express();
-const port = 3000;
+const port = process.env.PORT || 3000;
+const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
+const resend = new Resend(process.env.RESEND_API_KEY); // Ekhon API key-ti pabe
 
-// --- Middleware ---
-// app.use(cors()); // <-- Purono duplicate line-ti baad dewa hoyeche
+// --- 3. Ebar middleware bebohar korun ---
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
-env.config();
+
+const { Pool } = pg;
 
 const allowedOrigins = [
     'https://soumya28022005.github.io',
     'http://localhost:5501',
     'http://127.0.0.1:5501',
-    'http://127.0.0.1:5500', // Apnar notun port
-    'https://doctorname.netlify.app',
+    'http://127.0.0.1:5500', 
+    'https://doctormame.netlify.app', // Banan thik kora holo
     "null"
 ];
 
@@ -51,19 +54,8 @@ const db = new Pool({
     family: 4,
 });
 
-// --- Email Transporter ---
-const transporter = nodemailer.createTransport({
-    host: process.env.EMAIL_HOST,
-    port: 587,
-    secure: false,
-    auth: {
-        user: process.env.EMAIL_USER,
-        pass: process.env.EMAIL_PASS,
-    },
-});
-
 // --- In-memory OTP Storage ---
-const otpStorage = {}; // Ekhon eta defined
+const otpStorage = {}; 
 
 // --- Helper Functions ---
 async function getNextQueueNumber(doctorId, date, clinicId) {
@@ -121,19 +113,14 @@ function verifyToken(req, res, next) {
 
 // --- Auth ---
 
-/**
- * NOTUN: Step 1 Signup - Request OTP
- */
 app.post("/api/signup/request-otp", async (req, res) => {
     const { username, mobile } = req.body;
     try {
-        // User exist kore kina check korun
         const existingPatient = await db.query("SELECT id FROM patients WHERE username = $1 OR mobile = $2", [username, mobile]);
         if (existingPatient.rows.length > 0) {
             return res.status(400).json({ success: false, message: "This email or mobile number is already registered." });
         }
 
-        // OTP toiri korun o store korun
         const otp = Math.floor(100000 + Math.random() * 900000).toString();
         otpStorage[username] = {
             otp: otp,
@@ -141,10 +128,10 @@ app.post("/api/signup/request-otp", async (req, res) => {
             verified: false
         };
 
-        // OTP email pathan
-        await transporter.sendMail({
-            from: `"Med-Connect" <${process.env.EMAIL_USER}>`,
-            to: username,
+        // --- Resend Email Code ---
+        await resend.emails.send({
+            from: 'Med-Connect <onboarding@resend.dev>', 
+            to: username, 
             subject: "Verify Your Email for Med-Connect",
             html: `
                 <p>Thank you for registering with Med-Connect.</p>
@@ -162,19 +149,15 @@ app.post("/api/signup/request-otp", async (req, res) => {
     }
 });
 
-/**
- * PORIBORTITO: Step 2 Signup - Create Patient (with OTP)
- */
 app.post("/api/signup/patient", async (req, res) => {
     const { name, dob, mobile, username, password, otp } = req.body;
 
     try {
-        // 1. OTP Validate korun
         const storedData = otpStorage[username];
         if (!storedData) {
             return res.status(400).json({ success: false, message: "Please request an OTP first." });
         }
-        const isExpired = (Date.now() - storedData.timestamp) > 10 * 60 * 1000; // 10 minutes
+        const isExpired = (Date.now() - storedData.timestamp) > 10 * 60 * 1000; 
         if (isExpired) {
             delete otpStorage[username];
             return res.status(400).json({ success: false, message: "OTP has expired. Please request a new one." });
@@ -183,23 +166,19 @@ app.post("/api/signup/patient", async (req, res) => {
             return res.status(400).json({ success: false, message: "Invalid OTP." });
         }
 
-        // 2. Abar check korun user ache kina
         const existingPatient = await db.query("SELECT id FROM patients WHERE username = $1 OR mobile = $2", [username, mobile]);
         if (existingPatient.rows.length > 0) {
             return res.status(400).json({ success: false, message: "This email or mobile number is already registered." });
         }
 
-        // 3. Password Hash Korun
         const saltRounds = 10;
         const hashedPassword = await bcrypt.hash(password, saltRounds);
 
-        // 4. User toiri korun
         const result = await db.query(
             "INSERT INTO patients (name, dob, mobile, username, password) VALUES ($1, $2, $3, $4, $5) RETURNING *",
-            [name, dob, mobile, username, hashedPassword] // Hashed password save korun
+            [name, dob, mobile, username, hashedPassword] 
         );
 
-        // 5. OTP delete korun
         delete otpStorage[username];
 
         res.json({ success: true, user: result.rows[0] });
@@ -210,34 +189,27 @@ app.post("/api/signup/patient", async (req, res) => {
 });
 
 
-/**
- * PORIBORTITO: Login (with bcrypt ebong Thank You Email)
- */
 app.post("/api/login/:role", async (req, res) => {
     const { role } = req.params;
     const { username, password } = req.body;
     const tableName = `${role}s`;
     try {
-        // Step 1: Username diye user khujun
         const result = await db.query(`SELECT * FROM ${tableName} WHERE username = $1`, [username]);
 
         if (result.rows.length > 0) {
             const user = result.rows[0];
-
-            // Step 2: Hashed password compare korun
             const match = await bcrypt.compare(password, user.password);
 
             if (match) {
-                // Password mile geche
                 const token = jwt.sign(
                     { userId: user.id, role: role },
                     process.env.JWT_SECRET,
                     { expiresIn: '1h' }
                 );
 
-                // "Thank you for logging in" email pathan (background-e cholbe)
-                transporter.sendMail({
-                    from: `"Med-Connect" <${process.env.EMAIL_USER}>`,
+                // --- Resend Email Code ---
+                resend.emails.send({
+                    from: 'Med-Connect <onboarding@resend.dev>',
                     to: user.username,
                     subject: "New Login to Med-Connect",
                     html: `
@@ -246,17 +218,15 @@ app.post("/api/login/:role", async (req, res) => {
                         <p>If this was you, you can safely ignore this email.</p>
                         <p>If this was not you, please reset your password immediately.</p>
                     `
-                }).catch(err => console.error("Login email error:", err)); // Error log korun
+                }).catch(err => console.error("Login email error:", err));
 
-                delete user.password; // Password pathaben na
+                delete user.password;
                 res.json({ success: true, user: user, token: token });
 
             } else {
-                // Password bHUL
                 res.json({ success: false, message: "Invalid username or password." });
             }
         } else {
-            // User paoa jai ni
             res.json({ success: false, message: "Invalid username or password." });
         }
     } catch (err) {
@@ -265,9 +235,6 @@ app.post("/api/login/:role", async (req, res) => {
     }
 });
 
-/**
- * PORIBORTITO: Forgot Password (English text)
- */
 app.post("/api/forgot-password", async (req, res) => {
     const { username, role } = req.body;
     const tableName = `${role}s`;
@@ -284,8 +251,9 @@ app.post("/api/forgot-password", async (req, res) => {
             role: role
         };
 
-        await transporter.sendMail({
-            from: `"Med-Connect" <${process.env.EMAIL_USER}>`,
+        // --- Resend Email Code ---
+        await resend.emails.send({
+            from: 'Med-Connect <onboarding@resend.dev>',
             to: username,
             subject: "Your Password Reset OTP",
             html: `
@@ -304,9 +272,6 @@ app.post("/api/forgot-password", async (req, res) => {
     }
 });
 
-/**
- * PORIBORTITO: Reset Password (with bcrypt ebong English)
- */
 app.post("/api/reset-password", async (req, res) => {
     const { username, otp, newPassword } = req.body;
     try {
@@ -323,11 +288,9 @@ app.post("/api/reset-password", async (req, res) => {
             return res.status(400).json({ success: false, message: "Invalid OTP." });
         }
 
-        // Notun password hash korun
         const saltRounds = 10;
         const hashedPassword = await bcrypt.hash(newPassword, saltRounds);
 
-        // Hashed password database-e update korun
         const tableName = `${storedData.role}s`;
         await db.query(`UPDATE ${tableName} SET password = $1 WHERE username = $2`, [hashedPassword, username]);
 
@@ -488,9 +451,6 @@ app.get('/api/appointments/clinic/:clinicId', async (req, res) => {
     }
 });
 
-/**
- * PORIBORTITO: Appointment Booking (with Email Confirmation)
- */
 app.post("/api/appointments/book", async (req, res) => {
     const { patientId, doctorId, clinicId, date } = req.body;
     try {
@@ -499,16 +459,15 @@ app.post("/api/appointments/book", async (req, res) => {
             return res.status(400).json({ success: false, message: "You already have an appointment with this doctor on this day." });
         }
         
-        // --- MODIFICATION 1: Add clinic query ---
         const [doctor, patient, schedule, clinic] = await Promise.all([
             db.query("SELECT * FROM doctors WHERE id = $1", [doctorId]).then(r => r.rows[0]),
             db.query("SELECT * FROM patients WHERE id = $1", [patientId]).then(r => r.rows[0]),
             db.query("SELECT * FROM doctor_schedules WHERE doctor_id = $1 AND clinic_id = $2", [doctorId, clinicId]).then(r => r.rows[0]),
-            db.query("SELECT name FROM clinics WHERE id = $1", [clinicId]).then(r => r.rows[0]) // <-- Added this
+            db.query("SELECT name FROM clinics WHERE id = $1", [clinicId]).then(r => r.rows[0])
         ]);
 
         if (!schedule) return res.status(400).json({ success: false, message: "Doctor does not have a valid schedule at this clinic for booking." });
-        if (!clinic) return res.status(400).json({ success: false, message: "Clinic not found." }); // <-- Added check
+        if (!clinic) return res.status(400).json({ success: false, message: "Clinic not found." }); 
 
         if (schedule.patient_limit > 0) {
             const appointmentCountRes = await db.query("SELECT COUNT(*) FROM appointments WHERE doctor_id = $1 AND clinic_id = $2 AND date = $3", [doctorId, clinicId, date]);
@@ -525,10 +484,10 @@ app.post("/api/appointments/book", async (req, res) => {
         
         await db.query(`INSERT INTO appointments (patient_id, doctor_id, clinic_id, date, "time", status, queue_number) VALUES ($1, $2, $3, $4, $5, 'Confirmed', $6) RETURNING *`, [patient.id, doctor.id, clinicId, date, approxTime, queueNumber]);
 
-        // --- MODIFICATION 2: Send confirmation email ---
-        transporter.sendMail({
-            from: `"Med-Connect" <${process.env.EMAIL_USER}>`,
-            to: patient.username, // Patient's email
+        // --- Resend Email Code ---
+        resend.emails.send({
+            from: 'Med-Connect <onboarding@resend.dev>',
+            to: patient.username, 
             subject: "Your Appointment is Confirmed!",
             html: `
                 <p>Hi ${patient.name},</p>
@@ -543,7 +502,7 @@ app.post("/api/appointments/book", async (req, res) => {
                 <p>You can check the live queue status in your dashboard on the day of your appointment.</p>
                 <p>Thank you for using Med-Connect.</p>
             `
-        }).catch(err => console.error("Booking confirmation email error:", err)); // Log error but don't block response
+        }).catch(err => console.error("Booking confirmation email error:", err)); 
 
         res.json({ success: true });
     } catch (err) {
@@ -576,9 +535,6 @@ app.post("/api/receptionist/handle-join-request", async (req, res) => {
     }
 });
 
-/**
- * PORIBORTITO: Receptionist Add Doctor (with bcrypt)
- */
 app.post("/api/receptionist/add-doctor", async (req, res) => {
     const { name, specialty, username, password, Phonenumber, startTime, endTime, days, patientLimit, clinicId } = req.body;
     const client = await db.connect();
@@ -786,14 +742,10 @@ app.post("/api/appointments/:appointmentId/status", async (req, res) => {
 });
 
 
-/**
- * PORIBORTITO: Receptionist Add Patient & Book (with bcrypt)
- */
 app.post("/api/receptionist/add-patient-and-book", async (req, res) => {
     const { patientName, patientAge, doctorId, clinicId } = req.body;
     const today = new Date().toISOString().slice(0, 10);
     try {
-        // Default password hash korun
         const saltRounds = 10;
         const hashedPassword = await bcrypt.hash('password123', saltRounds);
         
@@ -818,10 +770,6 @@ app.post("/api/receptionist/add-patient-and-book", async (req, res) => {
 });
 
 // --- Admin Actions ---
-
-/**
- * PORIBORTITO: Admin Add Clinic (with bcrypt for Receptionist)
- */
 app.post('/api/admin/clinics', async (req, res) => {
     const { name, address, receptionist_name, receptionist_username, receptionist_password } = req.body;
     try {
@@ -840,9 +788,6 @@ app.post('/api/admin/clinics', async (req, res) => {
     }
 });
 
-/**
- * PORIBORTITO: Admin Add Doctor (with bcrypt)
- */
 app.post('/api/admin/doctors', async (req, res) => {
     const { name, specialty, username, password, phone, clinicId, startTime, endTime, days, patientLimit } = req.body;
     try {
@@ -860,9 +805,6 @@ app.post('/api/admin/doctors', async (req, res) => {
     }
 });
 
-/**
- * PORIBORTITO: Admin Add Patient (with bcrypt)
- */
 app.post('/api/admin/patients', async (req, res) => {
     const { name, dob, username, password, mobile } = req.body;
     try {
@@ -966,7 +908,7 @@ app.get("/api/health-check", (req, res) => {
 });
 
 /**
- * PORIBORTITO: Google Auth (with bcrypt)
+ * PORIBORTITO: Google Auth (Resend diye update kora holo)
  */
 app.post("/api/auth/google", async (req, res) => {
     try {
@@ -985,9 +927,7 @@ app.post("/api/auth/google", async (req, res) => {
 
         if (userResult.rows.length > 0) {
             user = userResult.rows[0];
-            // Google login-er jonno password check korar dorkar nei
         } else {
-            // Notun user hole, ekta random hash password toiri kore store korun
             const saltRounds = 10;
             const hashedPassword = await bcrypt.hash(`google_${Date.now()}`, saltRounds); 
             
@@ -1004,9 +944,9 @@ app.post("/api/auth/google", async (req, res) => {
             { expiresIn: '1h' }
         );
         
-        // Google Login email pathan
-        transporter.sendMail({
-            from: `"Med-Connect" <${process.env.EMAIL_USER}>`,
+        // --- NOTUN EMAIL CODE ---
+        resend.emails.send({
+            from: 'Med-Connect <onboarding@resend.dev>',
             to: user.username,
             subject: "New Login to Med-Connect (via Google)",
             html: `
@@ -1026,7 +966,7 @@ app.post("/api/auth/google", async (req, res) => {
 });
 
 // --- Server ---
-app.listen(port, () => {
+app.listen(port, '0.0.0.0', () => { // <-- PORIBORTON: Render-er jonno
     console.log(`Backend server running on http://localhost:${port}`);
     deleteOldAppointments();
     setInterval(deleteOldAppointments, 24 * 60 * 60 * 1000);
