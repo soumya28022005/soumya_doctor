@@ -5,6 +5,8 @@ import cors from "cors";
 import { OAuth2Client } from 'google-auth-library';
 import env from "dotenv";
 import jwt from 'jsonwebtoken';
+import nodemailer from 'nodemailer';
+
 
 const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
@@ -88,6 +90,16 @@ async function checkScheduleConflict(doctorId, startTime, endTime, days, schedul
         client.release();
     }
 }
+const transporter = nodemailer.createTransport({
+    host: process.env.EMAIL_HOST,
+    port: 587,
+    secure: false, // true for 465, false for other ports
+    auth: {
+        user: process.env.EMAIL_USER,
+        pass: process.env.EMAIL_PASS,
+    },
+});
+
 function verifyToken(req, res, next) {
     const authHeader = req.headers['authorization'];
     const token = authHeader && authHeader.split(' ')[1]; // Format: "Bearer <token>"
@@ -784,6 +796,85 @@ app.post("/api/auth/google", async (req, res) => {
     } catch (err) {
         console.error("Google Auth Error:", err);
         res.status(401).json({ success: false, message: "Google authentication failed." });
+    }
+});
+
+app.post("/api/forgot-password", async (req, res) => {
+    const { username, role } = req.body;
+    const tableName = `${role}s`;
+    
+    try {
+        // 1. User-ke khujun
+        const userRes = await db.query(`SELECT * FROM ${tableName} WHERE username = $1`, [username]);
+        if (userRes.rows.length === 0) {
+            return res.status(404).json({ success: false, message: "Ei email/username diye kono user paoa jai ni." });
+        }
+
+        // 2. 6-digit OTP toiri korun
+        const otp = Math.floor(100000 + Math.random() * 900000).toString();
+
+        // 3. OTP store korun (10 minuter jonno)
+        otpStorage[username] = {
+            otp: otp,
+            timestamp: Date.now(),
+            role: role
+        };
+
+        // 4. Email Pathan
+        await transporter.sendMail({
+            from: `"Med-Connect" <${process.env.EMAIL_USER}>`,
+            to: username, // username-i email hisebe dhora hocche
+            subject: "Your Password Reset OTP",
+            html: `
+                <p>Apnar Med-Connect password reset-er jonno OTP holo:</p>
+                <h2 style="font-size: 24px; letter-spacing: 2px; color: #1d4ed8;">${otp}</h2>
+                <p>Ei OTP-ti 10 minute porjonto valid thakbe.</p>
+                <p>Jodi apni ei request na kore thaken, tahole ei email-ti ignore korun.</p>
+            `
+        });
+
+        res.json({ success: true, message: "Ekti OTP apnar email-e pathano hoyeche." });
+
+    } catch (err) {
+        console.error("Forgot Password Error:", err);
+        res.status(500).json({ success: false, message: "OTP pathate giye error hoyeche." });
+    }
+});
+
+app.post("/api/reset-password", async (req, res) => {
+    const { username, otp, newPassword } = req.body;
+
+    try {
+        // 1. Stored OTP data ber korun
+        const storedData = otpStorage[username];
+
+        // 2. Validate OTP
+        if (!storedData) {
+            return res.status(400).json({ success: false, message: "OTP request kora hoi ni ba meyad shesh." });
+        }
+
+        const isExpired = (Date.now() - storedData.timestamp) > 10 * 60 * 1000; // 10 minutes
+        if (isExpired) {
+            delete otpStorage[username];
+            return res.status(400).json({ success: false, message: "OTP-er meyad shesh. Abar cheshta korun." });
+        }
+
+        if (storedData.otp !== otp) {
+            return res.status(400).json({ success: false, message: "Sothik OTP den." });
+        }
+
+        // 3. Password Update korun (Plain text, jemon apnar system-e ache)
+        const tableName = `${storedData.role}s`;
+        await db.query(`UPDATE ${tableName} SET password = $1 WHERE username = $2`, [newPassword, username]);
+
+        // 4. Used OTP delete korun
+        delete otpStorage[username];
+
+        res.json({ success: true, message: "Password success-fully reset kora hoyeche. Ekhon login korun." });
+
+    } catch (err) {
+        console.error("Reset Password Error:", err);
+        res.status(500).json({ success: false, message: "Password reset korte giye error hoyeche." });
     }
 });
 
