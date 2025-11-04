@@ -7,6 +7,7 @@ import env from "dotenv";
 import jwt from 'jsonwebtoken';
 import nodemailer from 'nodemailer';
 import bcrypt from 'bcrypt'; 
+import { Resend } from 'resend'
 
 const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
@@ -59,6 +60,8 @@ const transporter = nodemailer.createTransport({
         pass: process.env.EMAIL_PASS,
     },
 });
+// for render
+const resend = new Resend(process.env.RESEND_API_KEY);
 
 // --- In-memory OTP Storage ---
 const otpStorage = {}; // Ekhon eta defined
@@ -138,16 +141,29 @@ app.post("/api/signup/request-otp", async (req, res) => {
         };
 
         // OTP email pathan
-        await transporter.sendMail({
-            from: `"Med-Connect" <${process.env.EMAIL_USER}>`,
-            to: username,
-            subject: "Verify Your Email for Med-Connect",
-            html: `
-                <p>Thank you for registering with Med-Connect.</p>
-                <p>Your One-Time Password (OTP) is:</p>
-                <h2 style="font-size: 24px; letter-spacing: 2px; color: #1d4ed8;">${otp}</h2>
-                <p>This OTP is valid for 10 minutes.</p>
-            `
+        // await transporter.sendMail({
+        //     from: `"Med-Connect" <${process.env.EMAIL_USER}>`,
+        //     to: username,
+        //     subject: "Verify Your Email for Med-Connect",
+        //     html: `
+        //         <p>Thank you for registering with Med-Connect.</p>
+        //         <p>Your One-Time Password (OTP) is:</p>
+        //         <h2 style="font-size: 24px; letter-spacing: 2px; color: #1d4ed8;">${otp}</h2>
+        //         <p>This OTP is valid for 10 minutes.</p>
+        //     `
+        // });
+        // resend use
+        //...
+        await resend.emails.send({
+             from: 'Med-Connect <onboarding@resend.dev>', // <-- Resend-er default "from" address
+                 to: username,
+                 subject: "Your Password Reset OTP",
+                     html: `
+                    <p>Your OTP for Med-Connect password reset is:</p>
+                     <h2 style="font-size: 24px; letter-spacing: 2px; color: #1d4ed8;">${otp}</h2>
+                      <p>This OTP is valid for 10 minutes.</p>
+                     <p>If you did not request this, please ignore this email.</p>
+                `
         });
 
         res.json({ success: true, message: "An OTP has been sent to your email." });
@@ -232,7 +248,7 @@ app.post("/api/login/:role", async (req, res) => {
                 );
 
                 // "Thank you for logging in" email pathan (background-e cholbe)
-                transporter.sendMail({
+                resend.emails.send({
                     from: `"Med-Connect" <${process.env.EMAIL_USER}>`,
                     to: user.username,
                     subject: "New Login to Med-Connect",
@@ -280,7 +296,7 @@ app.post("/api/forgot-password", async (req, res) => {
             role: role
         };
 
-        await transporter.sendMail({
+        await resend.emails.send({
             from: `"Med-Connect" <${process.env.EMAIL_USER}>`,
             to: username,
             subject: "Your Password Reset OTP",
@@ -522,7 +538,7 @@ app.post("/api/appointments/book", async (req, res) => {
         await db.query(`INSERT INTO appointments (patient_id, doctor_id, clinic_id, date, "time", status, queue_number) VALUES ($1, $2, $3, $4, $5, 'Confirmed', $6) RETURNING *`, [patient.id, doctor.id, clinicId, date, approxTime, queueNumber]);
 
         // --- MODIFICATION 2: Send confirmation email ---
-        transporter.sendMail({
+        resend.emails.send({
             from: `"Med-Connect" <${process.env.EMAIL_USER}>`,
             to: patient.username, // Patient's email
             subject: "Your Appointment is Confirmed!",
@@ -1001,7 +1017,7 @@ app.post("/api/auth/google", async (req, res) => {
         );
         
         // Google Login email pathan
-        transporter.sendMail({
+        resend.emails.send({
             from: `"Med-Connect" <${process.env.EMAIL_USER}>`,
             to: user.username,
             subject: "New Login to Med-Connect (via Google)",
