@@ -55,8 +55,7 @@ const db = new Pool({
 
 // --- Email Transporter ---
 const transporter = nodemailer.createTransport({
-    host: process.env.EMAIL_HOST,
-    port: 587,
+    service: 'gmail',
     secure: false,
     auth: {
         user: process.env.EMAIL_USER,
@@ -118,6 +117,7 @@ function verifyToken(req, res, next) {
         next();
     });
 }
+
 
 
 /**
