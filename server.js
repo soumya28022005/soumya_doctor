@@ -7,7 +7,6 @@ import env from "dotenv";
 import jwt from 'jsonwebtoken';
 import nodemailer from 'nodemailer';
 import bcrypt from 'bcrypt'; 
-import { Resend } from 'resend'
 
 const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
@@ -20,8 +19,6 @@ const port = 3000;
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 env.config();
-const resend = new Resend(process.env.RESEND_API_KEY);
-
 const allowedOrigins = [
     'https://soumya28022005.github.io',
     'http://localhost:5501',
