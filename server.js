@@ -23,7 +23,7 @@ const allowedOrigins = [
     'https://soumya28022005.github.io',
     'http://localhost:5501',
     'http://127.0.0.1:5501',
-    'http://127.0.0.1:5500', // Apnar notun port
+    'http://127.0.0.1:5500', 
     'https://doctorname.netlify.app',
     "null"
 ];
@@ -53,7 +53,6 @@ const db = new Pool({
 // --- Email Transporter ---
 const transporter = nodemailer.createTransport({
     service: 'gmail',
-    secure: false,
     auth: {
         user: process.env.EMAIL_USER,
         pass: process.env.EMAIL_PASS,
